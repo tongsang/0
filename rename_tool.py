@@ -16,11 +16,6 @@ HEADERS = {
     "Referer": "https://www.wnacg.com/",
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
-
-PH_EMPTY     = "（未搜索）"
-PH_NOTFOUND  = "（未找到匹配结果）"
-PREFIX_FAIL  = "[搜索失败]"
-
 ILLEGAL = r'[\\/:*?"<>|]'
 
 
@@ -103,7 +98,7 @@ class App:
         else:
             self.root.after(0, _do)
 
-    # ---------------- 目录 & 载入 ----------------
+    # ---------------- 目录 & 读取 ----------------
     def select_dir(self):
         d = filedialog.askdirectory()
         if d:
@@ -117,8 +112,8 @@ class App:
             return
         self.directory = d
         try:
-            self.files = sorted(
-                f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+            self.files = sorted(f for f in os.listdir(d)
+                                if os.path.isfile(os.path.join(d, f)))
         except Exception as e:
             messagebox.showerror("错误", str(e))
             return
@@ -127,7 +122,7 @@ class App:
         self.right_list.delete(0, tk.END)
         for f in self.files:
             self.left_list.insert(tk.END, f)
-            self.right_list.insert(tk.END, PH_EMPTY)
+            self.right_list.insert(tk.END, "")
 
         for w in self.check_inner.winfo_children():
             w.destroy()
@@ -142,12 +137,11 @@ class App:
         self.log(f"读取目录：{d}，共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
 
-    # ---------------- 右栏手动编辑 ----------------
+    # ---------------- 双击编辑右栏 ----------------
     def _edit_right(self, event):
         idx = self.right_list.nearest(event.y)
         if idx < 0:
             return
-        cur = self.right_list.get(idx)
         dlg = tk.Toplevel(self.root)
         dlg.title("编辑新文件名")
         dlg.geometry("640x100")
@@ -155,17 +149,16 @@ class App:
         dlg.grab_set()
         e = tk.Entry(dlg, font=("Microsoft YaHei", 10))
         e.pack(fill=tk.X, padx=10, pady=10)
-        e.insert(0, cur)
+        e.insert(0, self.right_list.get(idx))
         e.focus_set()
         def ok(_=None):
-            val = e.get()
             self.right_list.delete(idx)
-            self.right_list.insert(idx, val)
+            self.right_list.insert(idx, e.get())
             dlg.destroy()
         tk.Button(dlg, text="确定", command=ok).pack(pady=5)
         dlg.bind("<Return>", ok)
 
-    # ---------------- 勾选 ----------------
+    # ---------------- 勾选 & 长按 ----------------
     def _on_press(self, e):
         if self._press_timer:
             self.root.after_cancel(self._press_timer)
@@ -213,13 +206,13 @@ class App:
                 r = s.get(url, timeout=20)
                 self.log(f"    HTTP {r.status_code}，{len(r.text)} 字节")
                 if r.status_code != 200:
-                    result = f"{PREFIX_FAIL} HTTP {r.status_code}"
+                    result = f"[搜索失败] HTTP {r.status_code}"
                 else:
                     r.encoding = r.apparent_encoding or "utf-8"
                     result = self._parse(r.text, kw)
                     self.log(f"    → {result}")
             except Exception as e:
-                result = f"{PREFIX_FAIL} {e.__class__.__name__}"
+                result = f"[搜索失败] {e.__class__.__name__}"
                 self.log(f"    异常：{e}")
 
             self.root.after(0, self._set_right, i, result)
@@ -243,14 +236,14 @@ class App:
         links = soup.select('a[href*="/photos-index-aid-"]')
         self.log(f"    photos-index-aid 链接 {len(links)} 个")
         if not links:
-            return PH_NOTFOUND
+            return "（未找到匹配结果）"
         cands = []
         for a in links:
             t = (a.get("title") or a.get_text(strip=True) or "").strip()
             if t and t not in cands:
                 cands.append(t)
         if not cands:
-            return PH_NOTFOUND
+            return "（未找到匹配结果）"
         self.log(f"    候选 {len(cands)} 个，首个：{cands[0][:60]}")
         low = kw.lower()
         for c in cands:
@@ -262,25 +255,7 @@ class App:
         m = difflib.get_close_matches(kw, cands, n=1, cutoff=0.2)
         return m[0] if m else cands[0]
 
-    # ---------------- 有效性判定（关键修复） ----------------
-    def _is_valid_new(self, i):
-        """返回 (是否有效, 原因)"""
-        right = (self.right_list.get(i) or "").strip()
-        if not right:
-            return False, "空"
-        if right == PH_EMPTY:
-            return False, "未搜索"
-        if right == PH_NOTFOUND:
-            return False, "未找到"
-        if right.startswith(PREFIX_FAIL):
-            return False, "搜索失败"
-        # ★ 不再用 startswith("[") 判断，因为真实文件名常以 [ 开头
-        return True, ""
-
-    def _sanitize(self, name):
-        return re.sub(ILLEGAL, "_", name).strip().rstrip(".")
-
-    # ---------------- 确认重命名 ----------------
+    # ---------------- 确认重命名（极简：右侧是什么就用什么） ----------------
     def confirm_rename(self):
         selected = [i for i, v in enumerate(self.check_vars) if v.get()]
         self.log(f"=== 确认重命名，勾选 {len(selected)} 项 ===")
@@ -288,56 +263,56 @@ class App:
             messagebox.showinfo("提示", "没有勾选任何文件")
             return
 
-        valid, skip_reasons = [], {}
+        # 组装任务：直接取右栏当前显示的文字
+        tasks = []
         for i in selected:
-            ok, reason = self._is_valid_new(i)
-            old = self.left_list.get(i)
-            new = self.right_list.get(i)
-            if not ok:
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                self.log(f"  [跳过-{reason}] {old}  （右栏：{new}）")
+            old_name = self.left_list.get(i)
+            new_raw = (self.right_list.get(i) or "").strip()
+            if not new_raw:
+                self.log(f"  [跳过] 右栏为空：{old_name}")
                 continue
-            if new.strip() == old.strip():
-                skip_reasons["名称相同"] = skip_reasons.get("名称相同", 0) + 1
-                self.log(f"  [跳过-名称相同] {old}")
-                continue
-            valid.append(i)
-            self.log(f"  [有效] {old}  →  {new}")
+            tasks.append((i, old_name, new_raw))
 
-        if not valid:
-            msg = f"勾选了 {len(selected)} 个文件，但没有可用的新文件名。\n\n"
-            for r, n in skip_reasons.items():
-                msg += f"· {n} 个：{r}\n"
-            msg += "\n请查看下方日志了解具体原因。"
-            messagebox.showinfo("提示", msg)
+        if not tasks:
+            messagebox.showinfo("提示",
+                "勾选的行右栏都是空的。\n"
+                "请先点“开始搜索”，或双击右栏手动填写新名称。")
             return
 
         # 预览
         lines = []
-        for i in valid[:12]:
-            lines.append(f"{self.left_list.get(i)}\n    ➜  {self.right_list.get(i)}")
-        if len(valid) > 12:
-            lines.append(f"... 还有 {len(valid)-12} 个")
+        for i, old, new in tasks[:12]:
+            lines.append(f"{old}\n    ➜  {new}")
+        if len(tasks) > 12:
+            lines.append(f"... 还有 {len(tasks)-12} 个")
         preview = "\n".join(lines)
-        extra = ""
-        if skip_reasons:
-            extra = "\n\n（跳过：" + "，".join(f"{n} 个{r}" for r, n in skip_reasons.items()) + "）"
 
         if not messagebox.askyesno("确认重命名",
-                f"即将重命名 {len(valid)} 个文件：\n\n{preview}{extra}\n\n确定执行？"):
+                f"即将重命名 {len(tasks)} 个文件：\n\n{preview}\n\n确定执行？"):
             return
 
         ok_n, fail = 0, []
-        for i in valid:
-            old_name = self.left_list.get(i)
-            new_display = self.right_list.get(i).strip()
+        for i, old_name, new_raw in tasks:
             old_path = os.path.join(self.directory, old_name)
             ext = os.path.splitext(old_name)[1]
-            new_base = self._sanitize(new_display)
-            new_name = new_base if new_base.lower().endswith(ext.lower()) else new_base + ext
+            # 清理非法字符
+            new_base = re.sub(ILLEGAL, "_", new_raw).strip().rstrip(".")
+            if not new_base:
+                new_base = "unnamed"
+            # 保留原扩展名（如果右栏没写扩展名或扩展名不同）
+            if not new_base.lower().endswith(ext.lower()):
+                new_name = new_base + ext
+            else:
+                new_name = new_base
             new_path = os.path.join(self.directory, new_name)
 
-            if os.path.exists(new_path) and os.path.normcase(new_path) != os.path.normcase(old_path):
+            # 同名则跳过
+            if os.path.normcase(new_path) == os.path.normcase(old_path):
+                self.log(f"  - 名称相同，跳过：{old_name}")
+                continue
+
+            # 避免重名
+            if os.path.exists(new_path):
                 stem, e = os.path.splitext(new_name)
                 k = 1
                 while os.path.exists(os.path.join(self.directory, f"{stem}_{k}{e}")):
@@ -353,7 +328,7 @@ class App:
                 fail.append(f"{old_name}: {e}")
                 self.log(f"  ✗ {old_name}: {e}")
 
-        # 重新加载目录以刷新界面
+        # 刷新
         try:
             self.load_files()
         except Exception:
