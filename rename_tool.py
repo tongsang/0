@@ -152,13 +152,18 @@ class App:
         self.right_tree.bind("<MouseWheel>", self._on_mousewheel)
         self.right_tree.bind("<F2>", lambda e: self._edit_current_tree("R"))
 
-        # ---- 快捷键 Ctrl+C / Ctrl+A ----
-        for t in (self.left_tree, self.right_tree):
-            t.bind("<Control-c>", lambda e, w=t: self._copy_from_tree(w))
-            t.bind("<Control-C>", lambda e, w=t: self._copy_from_tree(w))
-            t.bind("<Control-a>", lambda e, w=t: self._select_all_in(w))
-            t.bind("<Control-A>", lambda e, w=t: self._select_all_in(w))
-            t.bind("<Control-Shift-Key-A>", lambda e, w=t: self._select_all_in(w))
+        # ---- 快捷键 ----
+        # 左树：Ctrl+C 复制；Ctrl+A 直接吞掉不响应
+        self.left_tree.bind("<Control-c>", lambda e: self._copy_from_tree(self.left_tree))
+        self.left_tree.bind("<Control-C>", lambda e: self._copy_from_tree(self.left_tree))
+        self.left_tree.bind("<Control-a>", lambda e: "break")
+        self.left_tree.bind("<Control-A>", lambda e: "break")
+
+        # 右树：Ctrl+C 复制；Ctrl+A 全选
+        self.right_tree.bind("<Control-c>", lambda e: self._copy_from_tree(self.right_tree))
+        self.right_tree.bind("<Control-C>", lambda e: self._copy_from_tree(self.right_tree))
+        self.right_tree.bind("<Control-a>", lambda e: self._select_all_in(self.right_tree))
+        self.right_tree.bind("<Control-A>", lambda e: self._select_all_in(self.right_tree))
 
         # ---- 右键菜单 ----
         self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
@@ -230,28 +235,19 @@ class App:
         return "break"
 
     def _select_all_in(self, tree):
+        """右侧全选。左侧因不绑定本函数而不会被调用"""
         items = tree.get_children()
         if not items:
             return "break"
-        mode = str(tree.cget("selectmode"))
-        if mode == "browse":
-            # 左栏为单选模式，仅选第一行
-            self._last_synced_item = items[0]
-            tree.selection_set(items[0])
-            tree.focus(items[0])
-            tree.see(items[0])
-            self.status.config(text="左栏为单选模式，已选中第一行", fg="gray")
-        else:
-            self._last_synced_item = items[0]
-            tree.selection_set(items)
-            tree.focus(items[0])
-            tree.see(items[0])
-            self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
+        self._last_synced_item = items[0]
+        tree.selection_set(items)
+        tree.focus(items[0])
+        tree.see(items[0])
+        self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
         return "break"
 
     # ---------------- 选择联动 ----------------
     def _on_left_select(self, event=None):
-        # 焦点交给左树，Ctrl+C/Ctrl+A 才能响应
         try:
             self.left_tree.focus_set()
         except Exception:
@@ -426,13 +422,16 @@ class App:
         finally:
             menu.grab_release()
 
-    # ---------------- 打开文件 ----------------
+    # ---------------- 打开文件 & 焦点处理 ----------------
     def _on_click(self, event, tree):
+        # 无条件把焦点交给被点击的 tree —— 保证随后的 Ctrl+C / Ctrl+A 作用于该 tree
+        tree.focus_set()
+
         region = tree.identify_region(event.x, event.y)
         if region != "cell":
             return None
         col = tree.identify_column(event.x)
-        if col != "#2":
+        if col != "#2":       # 非"打开"列不做额外处理，默认行为保留
             return None
         item = tree.identify_row(event.y)
         if not item:
