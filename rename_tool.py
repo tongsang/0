@@ -20,6 +20,11 @@ ILLEGAL = r'[\\/:*?"<>|]'
 
 MAX_PAGES = 30       # 单个关键词最多翻多少页（保险上限）
 PAGE_DELAY = 0.6     # 页与页之间的停顿（秒）
+MAX_ITEM_PAGES = 300 # 单条候选页数上限，超过则过滤
+AI_MARKERS = [       # 命中任一标记即过滤
+    "ai generated", "ai-generated", "ai生成", "ai绘制", "ai繪製",
+    "[ai]", "(ai)", "【ai】",
+]
 
 
 class App:
@@ -48,6 +53,7 @@ class App:
         self.directory = ""
         self.files = []
         self.searching = False
+        self._syncing = False      # 滚动同步的递归保护
         self._build()
 
     # ---------------- UI ----------------
@@ -65,22 +71,42 @@ class App:
 
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
+        # ---- 左列表 ----
         left = tk.LabelFrame(mid, text="① 原始文件名（只读）", font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.left_list = tk.Listbox(left, font=self.font_main,
-                                    selectmode=tk.NONE, activestyle="none")
-        self.left_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        lf_left = tk.Frame(left)
+        lf_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        self.left_list = tk.Listbox(lf_left, font=self.font_main,
+                                    selectmode=tk.NONE, activestyle="none")
+        self.left_sb = ttk.Scrollbar(lf_left, orient="vertical",
+                                     command=self.left_list.yview)
+        self.left_list.configure(yscrollcommand=self._on_yscroll_left)
+        self.left_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.left_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # ---- 右列表 ----
         right = tk.LabelFrame(
             mid, font=self.font_main,
             text="② 新文件名 —— 单击选中 / Shift+单击范围选 / Ctrl+单击加选 / 拖动划选")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(pad, 0))
+        lf_right = tk.Frame(right)
+        lf_right.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
         self.right_list = tk.Listbox(
-            right, font=self.font_main, fg="#1565C0",
+            lf_right, font=self.font_main, fg="#1565C0",
             selectmode=tk.EXTENDED, selectbackground="#1976D2",
             selectforeground="white")
-        self.right_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.right_sb = ttk.Scrollbar(lf_right, orient="vertical",
+                                      command=self.right_list.yview)
+        self.right_list.configure(yscrollcommand=self._on_yscroll_right)
+        self.right_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.right_list.bind("<Double-Button-1>", self._edit_right)
+
+        # 鼠标滚轮同步（Windows 下更丝滑）
+        self.left_list.bind("<MouseWheel>", self._on_mousewheel)
+        self.right_list.bind("<MouseWheel>", self._on_mousewheel)
 
         bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
@@ -104,6 +130,31 @@ class App:
         self.log_text.configure(yscrollcommand=ls.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ---------------- 滚动同步 ----------------
+    def _on_yscroll_left(self, first, last):
+        self.left_sb.set(first, last)
+        if not self._syncing:
+            self._syncing = True
+            try:
+                self.right_list.yview_moveto(first)
+            finally:
+                self._syncing = False
+
+    def _on_yscroll_right(self, first, last):
+        self.right_sb.set(first, last)
+        if not self._syncing:
+            self._syncing = True
+            try:
+                self.left_list.yview_moveto(first)
+            finally:
+                self._syncing = False
+
+    def _on_mousewheel(self, event):
+        step = -1 if event.delta > 0 else 1
+        self.left_list.yview_scroll(step, "units")
+        self.right_list.yview_scroll(step, "units")
+        return "break"
 
     # ---------------- 日志 ----------------
     def log(self, msg):
@@ -212,7 +263,6 @@ class App:
             result = self._search_one(s, base_kw)
             self.log(f"    首次：{result if result else '（无匹配）'}")
 
-            # 首次无匹配 → 去掉前 2 个字符再试一次
             if not result and len(base_kw) > 2:
                 trimmed = base_kw[2:]
                 if trimmed != base_kw:
@@ -247,7 +297,7 @@ class App:
 
         encoded = requests.utils.quote(kw)
         seen_titles = set()
-        all_items = []       # [(title, pages), ...] 全部去重后的候选
+        all_items = []
 
         for page_num in range(1, MAX_PAGES + 1):
             if page_num == 1:
@@ -274,18 +324,29 @@ class App:
                 self.log(f"      第{page_num}页无任何条目，停止翻页")
                 break
 
-            # 本页去重后的 (title, pages)
             page_items = []
             page_seen = set()
+            filtered_ai = 0
+            filtered_big = 0
+
             for a in links:
                 t = (a.get("title") or a.get_text(strip=True) or "").strip()
                 if not t or t in page_seen:
                     continue
+                # 过滤 AI Generated
+                if self._is_ai_generated(t):
+                    filtered_ai += 1
+                    continue
+                pages = self._extract_pages(a)
+                # 过滤超过 300 页
+                if pages > MAX_ITEM_PAGES:
+                    filtered_big += 1
+                    continue
                 page_seen.add(t)
-                page_items.append((t, self._extract_pages(a)))
+                page_items.append((t, pages))
 
             if not page_items:
-                self.log(f"      第{page_num}页无有效标题，停止翻页")
+                self.log(f"      第{page_num}页无有效条目，停止翻页")
                 break
 
             new_items = [(t, p) for t, p in page_items if t not in seen_titles]
@@ -295,8 +356,12 @@ class App:
 
             seen_titles.update(page_seen)
             all_items.extend(new_items)
+
+            extra = ""
+            if filtered_ai or filtered_big:
+                extra = f"｜过滤 AI {filtered_ai} 条、>{MAX_ITEM_PAGES}页 {filtered_big} 条"
             self.log(f"      第{page_num}页：{len(page_items)} 条"
-                     f"（其中 {len(new_items)} 条新，累计 {len(all_items)} 条）")
+                     f"（其中 {len(new_items)} 条新，累计 {len(all_items)} 条）{extra}")
 
             time.sleep(PAGE_DELAY)
 
@@ -306,6 +371,10 @@ class App:
 
         self.log(f"      — 翻页结束，共收集 {len(all_items)} 条候选 —")
         return self._pick_best(all_items, kw)
+
+    def _is_ai_generated(self, t):
+        low = t.lower()
+        return any(m in low for m in AI_MARKERS)
 
     # ---------- 从全部候选中挑选 ----------
     def _pick_best(self, items, kw):
@@ -317,7 +386,6 @@ class App:
         contains = [(t, p) for t, p in items if low in t.lower()]
         similar  = [(t, p) for t, p in items if sim(t) >= 0.35]
 
-        # 展示每组前 3 个候选，方便核对
         for grp, lbl in ((exact, "精确"), (contains, "包含"), (similar, "相似")):
             if grp:
                 top = sorted(grp, key=lambda x: -x[1])[:3]
@@ -329,7 +397,7 @@ class App:
                              (contains, "包含匹配"),
                              (similar, "相似匹配")):
             if group:
-                group.sort(key=lambda x: -x[1])   # 页数降序
+                group.sort(key=lambda x: -x[1])
                 best = group[0]
                 self.log(f"      ✓ {label}，共 {len(group)} 条，取页数最多："
                          f"[{best[1]}张] {best[0][:60]}")
@@ -339,7 +407,6 @@ class App:
         return ""
 
     def _extract_pages(self, a_tag):
-        """从链接所在容器里的 .info_col 提取页数，例如 26張圖片 → 26"""
         parent = a_tag
         for _ in range(6):
             parent = parent.parent
