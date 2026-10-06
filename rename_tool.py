@@ -23,16 +23,15 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("批量文件搜索重命名")
-        root.geometry("1250x820")
+        root.geometry("1250x760")
         self.directory = ""
         self.files = []
         self.searching = False
-        self.check_vars = []
-        self._press_timer = None
         self._build()
 
     # ---------------- UI ----------------
     def _build(self):
+        # 顶部：目录
         top = tk.Frame(self.root); top.pack(fill=tk.X, padx=10, pady=8)
         tk.Label(top, text="目录：").pack(side=tk.LEFT)
         self.dir_entry = tk.Entry(top)
@@ -40,51 +39,50 @@ class App:
         tk.Button(top, text="浏览", width=8, command=self.select_dir).pack(side=tk.LEFT)
         tk.Button(top, text="读取", width=8, command=self.load_files).pack(side=tk.LEFT, padx=5)
 
+        # 中部：左右两个列表
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=10)
-        left = tk.LabelFrame(mid, text="① 原始文件名")
+
+        # 左：原始文件名（只读参考）
+        left = tk.LabelFrame(mid, text="① 原始文件名（只读）")
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.left_list = tk.Listbox(left, font=("Microsoft YaHei", 10))
+        self.left_list = tk.Listbox(left, font=("Microsoft YaHei", 10),
+                                    selectmode=tk.NONE, activestyle="none")
         self.left_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        right = tk.LabelFrame(mid, text="② 新文件名（双击可手动修改）")
+        # 右：新文件名（多选/框选主战场）
+        right = tk.LabelFrame(
+            mid,
+            text="② 新文件名 —— 单击选中 / Shift+单击范围选 / Ctrl+单击加选 / 鼠标拖动划选")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
-        self.right_list = tk.Listbox(right, font=("Microsoft YaHei", 10), fg="#1565C0")
+        self.right_list = tk.Listbox(
+            right, font=("Microsoft YaHei", 10), fg="#1565C0",
+            selectmode=tk.EXTENDED, selectbackground="#1976D2",
+            selectforeground="white")
         self.right_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.right_list.bind("<Double-Button-1>", self._edit_right)
 
-        cf = tk.LabelFrame(self.root, text="③ 勾选需要重命名的项（长按此区域 0.8 秒全选）")
-        cf.pack(fill=tk.X, padx=10, pady=5)
-        self.check_canvas = tk.Canvas(cf, height=140)
-        self.check_scroll = ttk.Scrollbar(cf, orient="vertical", command=self.check_canvas.yview)
-        self.check_inner = tk.Frame(self.check_canvas)
-        self.check_inner.bind("<Configure>",
-            lambda e: self.check_canvas.configure(scrollregion=self.check_canvas.bbox("all")))
-        self.check_canvas.create_window((0, 0), window=self.check_inner, anchor="nw")
-        self.check_canvas.configure(yscrollcommand=self.check_scroll.set)
-        self.check_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.check_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # 底部操作栏
+        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=10, pady=8)
+        self.status = tk.Label(bottom, text="就绪", fg="gray")
+        self.status.pack(side=tk.LEFT)
 
+        tk.Button(bottom, text="确认重命名选中行", width=18, bg="#2196F3", fg="white",
+                  command=self.confirm_rename).pack(side=tk.RIGHT, padx=3)
+        tk.Button(bottom, text="开始搜索", width=12, bg="#4CAF50", fg="white",
+                  command=self.start_search).pack(side=tk.RIGHT, padx=10)
+        tk.Button(bottom, text="清空选择", width=10,
+                  command=self.clear_selection).pack(side=tk.RIGHT, padx=3)
+        tk.Button(bottom, text="全选", width=8,
+                  command=self.select_all).pack(side=tk.RIGHT, padx=3)
+
+        # 日志
         lf = tk.LabelFrame(self.root, text="日志")
-        lf.pack(fill=tk.X, padx=10, pady=5)
+        lf.pack(fill=tk.X, padx=10, pady=(0, 8))
         self.log_text = tk.Text(lf, height=7, font=("Consolas", 9), state="disabled")
         ls = ttk.Scrollbar(lf, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=ls.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
-
-        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=10, pady=8)
-        self.status = tk.Label(bottom, text="就绪", fg="gray")
-        self.status.pack(side=tk.LEFT)
-        tk.Button(bottom, text="确认重命名", width=12, bg="#2196F3", fg="white",
-                  command=self.confirm_rename).pack(side=tk.RIGHT, padx=3)
-        tk.Button(bottom, text="开始搜索", width=12, bg="#4CAF50", fg="white",
-                  command=self.start_search).pack(side=tk.RIGHT, padx=10)
-        tk.Button(bottom, text="全不选", width=8, command=self.deselect_all).pack(side=tk.RIGHT, padx=3)
-        tk.Button(bottom, text="全选", width=8, command=self.select_all).pack(side=tk.RIGHT, padx=3)
-
-        for w in (self.check_canvas, self.check_inner):
-            w.bind("<ButtonPress-1>", self._on_press)
-            w.bind("<ButtonRelease-1>", self._on_release)
 
     # ---------------- 日志 ----------------
     def log(self, msg):
@@ -98,7 +96,7 @@ class App:
         else:
             self.root.after(0, _do)
 
-    # ---------------- 目录 & 读取 ----------------
+    # ---------------- 目录 ----------------
     def select_dir(self):
         d = filedialog.askdirectory()
         if d:
@@ -123,19 +121,21 @@ class App:
         for f in self.files:
             self.left_list.insert(tk.END, f)
             self.right_list.insert(tk.END, "")
-
-        for w in self.check_inner.winfo_children():
-            w.destroy()
-        self.check_vars.clear()
-        for i, f in enumerate(self.files):
-            v = tk.BooleanVar(value=False)
-            self.check_vars.append(v)
-            tk.Checkbutton(self.check_inner, text=f"[{i+1:03d}] {f}",
-                           variable=v, anchor="w",
-                           font=("Microsoft YaHei", 9)).pack(fill=tk.X, padx=5)
-
         self.log(f"读取目录：{d}，共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
+
+    # ---------------- 全选 / 清空 ----------------
+    def select_all(self):
+        n = self.right_list.size()
+        if n == 0:
+            return
+        self.right_list.selection_set(0, tk.END)
+        self.right_list.see(0)
+        self.status.config(text=f"已选中 {n} 行", fg="blue")
+
+    def clear_selection(self):
+        self.right_list.selection_clear(0, tk.END)
+        self.status.config(text="已清空选择", fg="gray")
 
     # ---------------- 双击编辑右栏 ----------------
     def _edit_right(self, event):
@@ -144,43 +144,21 @@ class App:
             return
         dlg = tk.Toplevel(self.root)
         dlg.title("编辑新文件名")
-        dlg.geometry("640x100")
+        dlg.geometry("720x110")
         dlg.transient(self.root)
         dlg.grab_set()
         e = tk.Entry(dlg, font=("Microsoft YaHei", 10))
         e.pack(fill=tk.X, padx=10, pady=10)
         e.insert(0, self.right_list.get(idx))
         e.focus_set()
+        e.select_range(0, tk.END)
         def ok(_=None):
             self.right_list.delete(idx)
             self.right_list.insert(idx, e.get())
+            self.right_list.selection_set(idx)
             dlg.destroy()
         tk.Button(dlg, text="确定", command=ok).pack(pady=5)
         dlg.bind("<Return>", ok)
-
-    # ---------------- 勾选 & 长按 ----------------
-    def _on_press(self, e):
-        if self._press_timer:
-            self.root.after_cancel(self._press_timer)
-        self._press_timer = self.root.after(800, self._long_press_fired)
-
-    def _on_release(self, e):
-        if self._press_timer:
-            self.root.after_cancel(self._press_timer)
-            self._press_timer = None
-
-    def _long_press_fired(self):
-        self._press_timer = None
-        self.select_all()
-        self.status.config(text="长按已触发：全选", fg="blue")
-
-    def select_all(self):
-        for v in self.check_vars:
-            v.set(True)
-
-    def deselect_all(self):
-        for v in self.check_vars:
-            v.set(False)
 
     # ---------------- 搜索 ----------------
     def start_search(self):
@@ -206,13 +184,13 @@ class App:
                 r = s.get(url, timeout=20)
                 self.log(f"    HTTP {r.status_code}，{len(r.text)} 字节")
                 if r.status_code != 200:
-                    result = f"[搜索失败] HTTP {r.status_code}"
+                    result = ""
                 else:
                     r.encoding = r.apparent_encoding or "utf-8"
                     result = self._parse(r.text, kw)
-                    self.log(f"    → {result}")
+                    self.log(f"    → {result if result else '（无匹配）'}")
             except Exception as e:
-                result = f"[搜索失败] {e.__class__.__name__}"
+                result = ""
                 self.log(f"    异常：{e}")
 
             self.root.after(0, self._set_right, i, result)
@@ -223,7 +201,7 @@ class App:
 
     def _search_done(self):
         self.searching = False
-        self.status.config(text="搜索完成", fg="green")
+        self.status.config(text="搜索完成，请在右侧列表中选中要重命名的行", fg="green")
         self.log("=== 搜索完成 ===")
 
     def _set_right(self, i, text):
@@ -236,15 +214,14 @@ class App:
         links = soup.select('a[href*="/photos-index-aid-"]')
         self.log(f"    photos-index-aid 链接 {len(links)} 个")
         if not links:
-            return "（未找到匹配结果）"
+            return ""
         cands = []
         for a in links:
             t = (a.get("title") or a.get_text(strip=True) or "").strip()
             if t and t not in cands:
                 cands.append(t)
         if not cands:
-            return "（未找到匹配结果）"
-        self.log(f"    候选 {len(cands)} 个，首个：{cands[0][:60]}")
+            return ""
         low = kw.lower()
         for c in cands:
             if c.lower() == low:
@@ -255,28 +232,37 @@ class App:
         m = difflib.get_close_matches(kw, cands, n=1, cutoff=0.2)
         return m[0] if m else cands[0]
 
-    # ---------------- 确认重命名（极简：右侧是什么就用什么） ----------------
+    # ---------------- 确认重命名（极简：只处理被选中的行） ----------------
     def confirm_rename(self):
-        selected = [i for i, v in enumerate(self.check_vars) if v.get()]
-        self.log(f"=== 确认重命名，勾选 {len(selected)} 项 ===")
-        if not selected:
-            messagebox.showinfo("提示", "没有勾选任何文件")
+        sel = self.right_list.curselection()
+        self.log(f"=== 确认重命名，选中 {len(sel)} 行 ===")
+
+        if not sel:
+            messagebox.showinfo(
+                "提示",
+                "右侧列表里没有选中任何行。\n\n"
+                "请先在右侧列表中选中要重命名的行：\n"
+                "· 单击 = 选中一行\n"
+                "· Shift + 单击 = 范围选中（框选）\n"
+                "· Ctrl + 单击 = 加选\n"
+                "· 或点“全选”按钮")
             return
 
-        # 组装任务：直接取右栏当前显示的文字
+        # 直接取右栏当前文字
         tasks = []
-        for i in selected:
+        for i in sel:
             old_name = self.left_list.get(i)
             new_raw = (self.right_list.get(i) or "").strip()
             if not new_raw:
-                self.log(f"  [跳过] 右栏为空：{old_name}")
+                self.log(f"  [跳过] 第 {i+1} 行右栏为空：{old_name}")
                 continue
             tasks.append((i, old_name, new_raw))
 
         if not tasks:
-            messagebox.showinfo("提示",
-                "勾选的行右栏都是空的。\n"
-                "请先点“开始搜索”，或双击右栏手动填写新名称。")
+            messagebox.showinfo(
+                "提示",
+                f"选中的 {len(sel)} 行，右侧文字都是空的。\n\n"
+                "请先点“开始搜索”填充右侧，或双击右侧行手动填写。")
             return
 
         # 预览
@@ -287,7 +273,8 @@ class App:
             lines.append(f"... 还有 {len(tasks)-12} 个")
         preview = "\n".join(lines)
 
-        if not messagebox.askyesno("确认重命名",
+        if not messagebox.askyesno(
+                "确认重命名",
                 f"即将重命名 {len(tasks)} 个文件：\n\n{preview}\n\n确定执行？"):
             return
 
@@ -295,23 +282,14 @@ class App:
         for i, old_name, new_raw in tasks:
             old_path = os.path.join(self.directory, old_name)
             ext = os.path.splitext(old_name)[1]
-            # 清理非法字符
-            new_base = re.sub(ILLEGAL, "_", new_raw).strip().rstrip(".")
-            if not new_base:
-                new_base = "unnamed"
-            # 保留原扩展名（如果右栏没写扩展名或扩展名不同）
-            if not new_base.lower().endswith(ext.lower()):
-                new_name = new_base + ext
-            else:
-                new_name = new_base
+            new_base = re.sub(ILLEGAL, "_", new_raw).strip().rstrip(".") or "unnamed"
+            new_name = new_base if new_base.lower().endswith(ext.lower()) else new_base + ext
             new_path = os.path.join(self.directory, new_name)
 
-            # 同名则跳过
             if os.path.normcase(new_path) == os.path.normcase(old_path):
-                self.log(f"  - 名称相同，跳过：{old_name}")
+                self.log(f"  - 名称相同跳过：{old_name}")
                 continue
 
-            # 避免重名
             if os.path.exists(new_path):
                 stem, e = os.path.splitext(new_name)
                 k = 1
@@ -328,7 +306,6 @@ class App:
                 fail.append(f"{old_name}: {e}")
                 self.log(f"  ✗ {old_name}: {e}")
 
-        # 刷新
         try:
             self.load_files()
         except Exception:
