@@ -232,7 +232,7 @@ class App:
         m = difflib.get_close_matches(kw, cands, n=1, cutoff=0.2)
         return m[0] if m else cands[0]
 
-    # ---------------- 确认重命名（极简：只处理被选中的行） ----------------
+    # ---------------- 确认重命名（只处理选中行，原地更新 UI） ----------------
     def confirm_rename(self):
         sel = self.right_list.curselection()
         self.log(f"=== 确认重命名，选中 {len(sel)} 行 ===")
@@ -279,6 +279,8 @@ class App:
             return
 
         ok_n, fail = 0, []
+        updates = []   # (行索引, 新文件名) —— 用于原地刷新 UI
+
         for i, old_name, new_raw in tasks:
             old_path = os.path.join(self.directory, old_name)
             ext = os.path.splitext(old_name)[1]
@@ -301,15 +303,25 @@ class App:
             try:
                 os.rename(old_path, new_path)
                 ok_n += 1
+                updates.append((i, new_name))
                 self.log(f"  ✓ {old_name}  →  {new_name}")
             except Exception as e:
                 fail.append(f"{old_name}: {e}")
                 self.log(f"  ✗ {old_name}: {e}")
 
-        try:
-            self.load_files()
-        except Exception:
-            pass
+        # ===== 原地更新被重命名的行，其他行保持原样 =====
+        for i, new_name in updates:
+            # 更新左栏文字为新文件名
+            self.left_list.delete(i)
+            self.left_list.insert(i, new_name)
+            # 右栏对应位置清空（表示已完成）
+            self.right_list.delete(i)
+            self.right_list.insert(i, "")
+        # 清除选择
+        self.right_list.selection_clear(0, tk.END)
+        # 同步内存里的文件名列表，避免后续操作错位
+        for i, new_name in updates:
+            self.files[i] = new_name
 
         msg = f"成功重命名 {ok_n} 个文件"
         if fail:
