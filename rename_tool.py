@@ -58,8 +58,10 @@ class App:
         self.directory = ""
         self.files = []
         self.searching = False
-        self._syncing = False
-        self._last_open_time = 0.0
+        self._scrolling_sync = False           # 滚动同步防递归
+        self._last_synced_item = None          # 选择联动防递归
+        self._jump_after_id = None             # 日志跳转防抖
+        self._last_open_time = 0.0             # 打开图标防抖
 
         self._build()
 
@@ -67,7 +69,6 @@ class App:
     def _build(self):
         pad = int(10 * self.scale)
 
-        # Treeview 样式
         style = ttk.Style()
         try:
             style.theme_use("clam")
@@ -135,7 +136,7 @@ class App:
         self.right_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # ---- 事件 ----
+        # ---- 事件绑定 ----
         self.left_tree.bind("<<TreeviewSelect>>", self._on_left_select)
         self.left_tree.bind("<Button-1>",
                             lambda e: self._on_click(e, self.left_tree), add="+")
@@ -151,7 +152,7 @@ class App:
         self.right_tree.bind("<MouseWheel>", self._on_mousewheel)
         self.right_tree.bind("<F2>", lambda e: self._edit_current_tree("R"))
 
-        # ---- 右键菜单（无"打开"） ----
+        # 右键菜单
         self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
         self.ctx_left_menu.add_command(label="编辑该行",
                                        command=lambda: self._edit_current_tree("L"))
@@ -177,7 +178,7 @@ class App:
                              lambda e: self._show_menu(e, self.right_tree,
                                                        self.ctx_right_menu))
 
-        # ---- 底部按钮 ----
+        # ---- 底部 ----
         bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad,
                                                   pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
@@ -205,6 +206,87 @@ class App:
         self.log_text.configure(yscrollcommand=ls.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ---------------- 选择联动（无递归） ----------------
+    def _on_left_select(self, event=None):
+        sel = self.left_tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        if item == self._last_synced_item:
+            return
+        self._last_synced_item = item
+        # 同步到右侧
+        self.right_tree.selection_set(item)
+        self.right_tree.focus(item)
+        self.right_tree.see(item)
+        # 跳日志
+        idx = int(item)
+        if 0 <= idx < len(self.files):
+            self._schedule_jump(self.files[idx])
+
+    def _on_right_select(self, event=None):
+        sel = self.right_tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        if item == self._last_synced_item:
+            return
+        self._last_synced_item = item
+        self.left_tree.selection_set(item)
+        self.left_tree.focus(item)
+        self.left_tree.see(item)
+        idx = int(item)
+        if 0 <= idx < len(self.files):
+            self._schedule_jump(self.files[idx])
+
+    def _schedule_jump(self, filename):
+        """日志跳转防抖：80ms 内的连续点击只执行最后一次"""
+        if self._jump_after_id is not None:
+            try:
+                self.root.after_cancel(self._jump_after_id)
+            except Exception:
+                pass
+        self._jump_after_id = self.root.after(80, self._jump_log_now, filename)
+
+    def _jump_log_now(self, filename):
+        self._jump_after_id = None
+        if not filename:
+            return
+        try:
+            total = int(self.log_text.index("end-1c").split(".")[0])
+        except Exception:
+            return
+        if total <= 1:
+            return
+        pos = None
+        try:
+            pos = self.log_text.search(f"] {filename}", "1.0",
+                                       stopindex=tk.END, nocase=True)
+        except Exception:
+            pos = None
+        if not pos:
+            kw = os.path.splitext(filename)[0]
+            if kw:
+                try:
+                    pos = self.log_text.search(kw, "1.0",
+                                               stopindex=tk.END, nocase=True)
+                except Exception:
+                    pos = None
+        if not pos:
+            return
+        try:
+            line = int(pos.split(".")[0])
+            state = self.log_text.cget("state")
+            self.log_text.configure(state="normal")
+            self.log_text.tag_remove("jump_hl", "1.0", tk.END)
+            self.log_text.tag_add("jump_hl", f"{line}.0", f"{line}.end")
+            self.log_text.tag_configure("jump_hl", background=HL_BG,
+                                        foreground=HL_FG)
+            self.log_text.configure(state=state)
+            self.log_text.see(pos)
+        except Exception:
+            pass
 
     # ---------------- 内联编辑 ----------------
     def _start_cell_edit(self, tree, item, side):
@@ -247,11 +329,11 @@ class App:
         tree.set(item, "name", new_val)
         if side == "L":
             self.log(f"  ✎ 第 {idx+1} 行 原文件名 → {new_val}")
-            # ★ 编辑左侧后，同步刷新右侧为编辑后的内容
+            # 左侧编辑后，同步刷新右侧为该内容
             if self.right_tree.exists(item):
                 self.right_tree.set(item, "name", new_val)
             if idx < len(self.files):
-                self._jump_log(self.files[idx])
+                self._schedule_jump(self.files[idx])
         else:
             self.log(f"  ✎ 第 {idx+1} 行 新文件名 → {new_val}")
 
@@ -265,7 +347,8 @@ class App:
         item = tree.identify_row(event.y)
         if not item:
             return
-        self._start_cell_edit(tree, item, side)
+        # 双击编辑需要延迟一点，让默认选择先处理完
+        self.root.after(10, lambda: self._start_cell_edit(tree, item, side))
 
     def _edit_current_tree(self, side):
         tree = self.left_tree if side == "L" else self.right_tree
@@ -305,7 +388,7 @@ class App:
         finally:
             menu.grab_release()
 
-    # ---------------- 打开文件（点 📂 列） ----------------
+    # ---------------- 打开文件（点 📂） ----------------
     def _on_click(self, event, tree):
         region = tree.identify_region(event.x, event.y)
         if region != "cell":
@@ -316,7 +399,6 @@ class App:
         item = tree.identify_row(event.y)
         if not item:
             return None
-        # 防抖：双击时不重复打开
         now = time.time()
         if now - self._last_open_time < 0.5:
             return "break"
@@ -345,104 +427,35 @@ class App:
         except Exception as e:
             messagebox.showerror("错误", f"无法打开：{e}")
 
-    # ---------------- 左右联动 ----------------
-    def _on_left_select(self, event=None):
-        if self._syncing:
-            return
-        sel = self.left_tree.selection()
-        if not sel:
-            return
-        item = sel[0]
-        self._syncing = True
-        try:
-            self.right_tree.selection_set(item)
-            self.right_tree.see(item)
-        finally:
-            self._syncing = False
-        idx = int(item)
-        if idx < len(self.files):
-            self._jump_log(self.files[idx])
-
-    def _on_right_select(self, event=None):
-        if self._syncing:
-            return
-        sel = self.right_tree.selection()
-        if not sel:
-            return
-        item = sel[0]
-        self._syncing = True
-        try:
-            self.left_tree.selection_set(item)
-            self.left_tree.see(item)
-        finally:
-            self._syncing = False
-        idx = int(item)
-        if idx < len(self.files):
-            self._jump_log(self.files[idx])
-
-    def _jump_log(self, filename):
-        if not filename:
-            return
-        try:
-            total_lines = int(self.log_text.index("end-1c").split(".")[0])
-        except Exception:
-            total_lines = 0
-        if total_lines <= 1:
-            return
-        pos = None
-        try:
-            pos = self.log_text.search(f"] {filename}", "1.0",
-                                       stopindex=tk.END, nocase=True)
-        except Exception:
-            pos = None
-        if not pos:
-            kw = os.path.splitext(filename)[0]
-            if kw:
-                try:
-                    pos = self.log_text.search(kw, "1.0",
-                                               stopindex=tk.END, nocase=True)
-                except Exception:
-                    pos = None
-        if not pos:
-            return
-        try:
-            line = int(pos.split(".")[0])
-            state = self.log_text.cget("state")
-            self.log_text.configure(state="normal")
-            self.log_text.tag_remove("jump_hl", "1.0", tk.END)
-            self.log_text.tag_add("jump_hl", f"{line}.0", f"{line}.end")
-            self.log_text.tag_configure("jump_hl", background=HL_BG,
-                                        foreground=HL_FG)
-            self.log_text.configure(state=state)
-            self.log_text.see(pos)
-        except Exception:
-            pass
-
     # ---------------- 滚动同步 ----------------
     def _on_yscroll_left(self, first, last):
         self.left_sb.set(first, last)
-        if self._syncing:
+        if self._scrolling_sync:
             return
-        self._syncing = True
+        self._scrolling_sync = True
         try:
             self.right_tree.yview_moveto(first)
         finally:
-            self._syncing = False
+            self._scrolling_sync = False
 
     def _on_yscroll_right(self, first, last):
         self.right_sb.set(first, last)
-        if self._syncing:
+        if self._scrolling_sync:
             return
-        self._syncing = True
+        self._scrolling_sync = True
         try:
             self.left_tree.yview_moveto(first)
         finally:
-            self._syncing = False
+            self._scrolling_sync = False
 
     def _on_mousewheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self.left_tree.yview_scroll(step, "units")
-        self.right_tree.yview_scroll(step, "units")
+        self._scrolling_sync = True
+        try:
+            self.left_tree.yview_scroll(step, "units")
+            self.right_tree.yview_scroll(step, "units")
+        finally:
+            self._scrolling_sync = False
         return "break"
 
     # ---------------- 日志 ----------------
@@ -482,6 +495,7 @@ class App:
             messagebox.showerror("错误", str(e))
             return
 
+        self._last_synced_item = None
         self.left_tree.delete(*self.left_tree.get_children())
         self.right_tree.delete(*self.right_tree.get_children())
         for i, f in enumerate(self.files):
@@ -499,11 +513,13 @@ class App:
         items = self.right_tree.get_children()
         if not items:
             return
+        self._last_synced_item = items[0]
         self.right_tree.selection_set(items)
         self.right_tree.see(items[0])
         self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
 
     def clear_selection(self):
+        self._last_synced_item = None
         self.right_tree.selection_remove(*self.right_tree.selection())
         self.status.config(text="已清空选择", fg="gray")
 
@@ -559,7 +575,6 @@ class App:
         if not cur:
             self.right_tree.set(item, "name", text)
 
-    # ---------- 逐页搜索 ----------
     def _search_one(self, session, keyword_raw):
         kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
         if not kw:
@@ -779,7 +794,6 @@ class App:
                 fail.append(f"{old_disk}: {e}")
                 self.log(f"  ✗ {old_disk}: {e}")
 
-        # 原地更新（不重新加载目录，保护其他行的手动修改）
         for i, new_name in updates:
             self.files[i] = new_name
             new_stem = os.path.splitext(new_name)[0]
@@ -787,6 +801,7 @@ class App:
             self.left_tree.set(item, "name", new_stem)
             self.right_tree.set(item, "name", "")
 
+        self._last_synced_item = None
         self.right_tree.selection_remove(*self.right_tree.selection())
 
         msg = f"成功重命名 {ok_n} 个文件"
