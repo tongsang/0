@@ -8,8 +8,7 @@ from tkinter import ttk, filedialog, messagebox
 import requests
 from bs4 import BeautifulSoup
 
-SEARCH_URL = "https://www.wnacg.com/search/?q={}"
-SITE_BASE  = "https://www.wnacg.com"
+SEARCH_BASE = "https://www.wnacg.com/search/?q={}"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -19,8 +18,8 @@ HEADERS = {
 }
 ILLEGAL = r'[\\/:*?"<>|]'
 
-MAX_PAGES = 20          # 每个关键词最多翻多少页
-PAGE_DELAY = 0.6        # 页与页之间的小停顿（秒），防触发反爬
+MAX_PAGES = 30       # 单个关键词最多翻多少页（保险上限）
+PAGE_DELAY = 0.6     # 页与页之间的停顿（秒）
 
 
 class App:
@@ -28,6 +27,7 @@ class App:
         self.root = root
         root.title("批量文件搜索重命名")
 
+        # ---------- DPI / 分辨率自适应 ----------
         try:
             self.dpi = root.winfo_fpixels('1i')
         except Exception:
@@ -213,6 +213,7 @@ class App:
             result = self._search_one(s, base_kw)
             self.log(f"    首次：{result if result else '（无匹配）'}")
 
+            # 首次无匹配 → 去掉前 2 个字符再试一次
             if not result and len(base_kw) > 2:
                 trimmed = base_kw[2:]
                 if trimmed != base_kw:
@@ -229,96 +230,6 @@ class App:
 
         self.root.after(0, self._search_done)
 
-    # ---------- 多页搜索 ----------
-    def _search_one(self, session, keyword_raw):
-        kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
-        if not kw:
-            return ""
-
-        url = SEARCH_URL.format(requests.utils.quote(kw))
-        visited = set()
-
-        for page_num in range(1, MAX_PAGES + 1):
-            if url in visited:
-                self.log(f"      ⚠ URL 重复，停止翻页")
-                break
-            visited.add(url)
-
-            # 抓页面
-            try:
-                r = session.get(url, timeout=20)
-                self.log(f"      【第{page_num}页】HTTP {r.status_code}，"
-                         f"{len(r.text)} 字节")
-                if r.status_code != 200:
-                    break
-                r.encoding = r.apparent_encoding or "utf-8"
-                html = r.text
-            except Exception as e:
-                self.log(f"      异常：{e}")
-                break
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            # 该页无任何候选 → 停止翻页
-            links = soup.select('a[href*="/photos-index-aid-"]')
-            if not links:
-                self.log(f"      第{page_num}页无候选条目，停止翻页")
-                break
-
-            # 解析该页
-            result = self._parse(html, kw, page_num)
-            if result:
-                return result
-
-            # 查找下一页
-            next_url = self._find_next_page(soup, url, page_num)
-            if not next_url:
-                self.log(f"      第{page_num}页无下一页，停止")
-                break
-
-            url = next_url
-            time.sleep(PAGE_DELAY)
-
-        return ""
-
-    def _find_next_page(self, soup, current_url, current_page):
-        """在当前页 HTML 里找"下一页"链接；找不到则尝试构造"""
-        target_p = current_page + 1
-
-        # 策略1：找 href 里 p=<target_p> 的链接
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if re.search(rf'[?&]p={target_p}(?:&|$)', href):
-                if href.startswith("http"):
-                    return href
-                if href.startswith("/"):
-                    return SITE_BASE + href
-
-        # 策略2：找"下一页"文本的链接
-        for a in soup.find_all("a", href=True):
-            txt = a.get_text(strip=True)
-            if txt in ("下一页", "下一頁", "Next", "next", "»", "›", ">"):
-                href = a["href"]
-                if href.startswith("http"):
-                    return href
-                if href.startswith("/"):
-                    return SITE_BASE + href
-
-        # 策略3：构造下一页 URL
-        # 第 1 页格式: /search/?q=XXX
-        # 第 2+ 页格式: /search/index.php?q=XXX&m=&syn=yes&f=_all&s=create_time_DESC&p=N
-        if current_page == 1:
-            m = re.search(r'[?&]q=([^&]+)', current_url)
-            if m:
-                q = m.group(1)
-                return (f"{SITE_BASE}/search/index.php?q={q}"
-                        f"&m=&syn=yes&f=_all&s=create_time_DESC&p={target_p}")
-        else:
-            if re.search(r'[?&]p=\d+', current_url):
-                return re.sub(r'([?&]p=)\d+', rf'\g<1>{target_p}', current_url)
-
-        return None
-
     def _search_done(self):
         self.searching = False
         self.status.config(text="搜索完成，请在右侧列表中选中要重命名的行", fg="green")
@@ -328,6 +239,72 @@ class App:
         if i < self.right_list.size():
             self.right_list.delete(i)
             self.right_list.insert(i, text)
+
+    # ---------- 逐页搜索：?q=关键词 → ?q=关键词&p=2 → ?q=关键词&p=3 → … ----------
+    def _search_one(self, session, keyword_raw):
+        kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
+        if not kw:
+            return ""
+
+        encoded = requests.utils.quote(kw)
+        seen_titles = set()
+
+        for page_num in range(1, MAX_PAGES + 1):
+            if page_num == 1:
+                url = SEARCH_BASE.format(encoded)
+            else:
+                url = f"{SEARCH_BASE.format(encoded)}&p={page_num}"
+
+            try:
+                r = session.get(url, timeout=20)
+                self.log(f"      【第{page_num}页】HTTP {r.status_code}，"
+                         f"{len(r.text)} 字节")
+                if r.status_code != 200:
+                    self.log(f"      状态码异常，停止翻页")
+                    break
+                r.encoding = r.apparent_encoding or "utf-8"
+                html = r.text
+            except Exception as e:
+                self.log(f"      异常：{e}")
+                break
+
+            soup = BeautifulSoup(html, "html.parser")
+            links = soup.select('a[href*="/photos-index-aid-"]')
+
+            if not links:
+                self.log(f"      第{page_num}页无任何条目，停止翻页")
+                break
+
+            # 收集本页所有标题
+            page_titles = []
+            for a in links:
+                t = (a.get("title") or a.get_text(strip=True) or "").strip()
+                if t:
+                    page_titles.append(t)
+
+            if not page_titles:
+                self.log(f"      第{page_num}页无标题，停止翻页")
+                break
+
+            # 判断本页是否带来新文件名
+            new_titles = [t for t in page_titles if t not in seen_titles]
+            if not new_titles:
+                self.log(f"      第{page_num}页没有新文件名，停止翻页")
+                break
+
+            seen_titles.update(page_titles)
+            self.log(f"      第{page_num}页：{len(page_titles)} 条"
+                     f"（其中 {len(new_titles)} 条是新的，"
+                     f"累计 {len(seen_titles)} 条）")
+
+            # 在本页匹配
+            result = self._parse(html, kw, page_num)
+            if result:
+                return result
+
+            time.sleep(PAGE_DELAY)
+
+        return ""
 
     # ---------- 单页解析：多结果取页数最多的 ----------
     def _parse(self, html, kw, page_num=1):
@@ -349,7 +326,7 @@ class App:
         if not items:
             return ""
 
-        self.log(f"      第{page_num}页候选 {len(items)} 个：")
+        # 打印部分候选（只打前 6 个，避免日志太长）
         for t, p in items[:6]:
             self.log(f"          [{p:>4}张] {t[:70]}")
         if len(items) > 6:
@@ -367,7 +344,7 @@ class App:
                              (contains, "包含匹配"),
                              (similar, "相似匹配")):
             if group:
-                group.sort(key=lambda x: -x[1])
+                group.sort(key=lambda x: -x[1])   # 页数降序
                 best = group[0]
                 self.log(f"      ✓ 第{page_num}页 {label}，取页数最多："
                          f"[{best[1]}张] {best[0][:60]}")
