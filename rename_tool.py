@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 SEARCH_URL = "https://www.wnacg.com/search/?q={}"
+SITE_BASE  = "https://www.wnacg.com"
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -18,13 +19,15 @@ HEADERS = {
 }
 ILLEGAL = r'[\\/:*?"<>|]'
 
+MAX_PAGES = 20          # 每个关键词最多翻多少页
+PAGE_DELAY = 0.6        # 页与页之间的小停顿（秒），防触发反爬
+
 
 class App:
     def __init__(self, root):
         self.root = root
         root.title("批量文件搜索重命名")
 
-        # ---------- DPI / 分辨率自适应 ----------
         try:
             self.dpi = root.winfo_fpixels('1i')
         except Exception:
@@ -106,7 +109,6 @@ class App:
     # ---------------- 日志（用户拖动时不强制回到最新） ----------------
     def log(self, msg):
         def _do():
-            # 判断插入前是否处于底部（用户没往上拖）
             try:
                 at_bottom = self.log_text.yview()[1] >= 0.999
             except Exception:
@@ -116,7 +118,6 @@ class App:
             self.log_text.insert(tk.END, str(msg) + "\n")
             self.log_text.configure(state="disabled")
 
-            # 只有原本就在底部才跟随最新；用户手动上滚时不打扰
             if at_bottom:
                 self.log_text.see(tk.END)
 
@@ -228,21 +229,95 @@ class App:
 
         self.root.after(0, self._search_done)
 
+    # ---------- 多页搜索 ----------
     def _search_one(self, session, keyword_raw):
         kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
         if not kw:
             return ""
+
         url = SEARCH_URL.format(requests.utils.quote(kw))
-        try:
-            r = session.get(url, timeout=20)
-            self.log(f"      HTTP {r.status_code}，{len(r.text)} 字节 | {url}")
-            if r.status_code != 200:
-                return ""
-            r.encoding = r.apparent_encoding or "utf-8"
-            return self._parse(r.text, kw)
-        except Exception as e:
-            self.log(f"      异常：{e}")
-            return ""
+        visited = set()
+
+        for page_num in range(1, MAX_PAGES + 1):
+            if url in visited:
+                self.log(f"      ⚠ URL 重复，停止翻页")
+                break
+            visited.add(url)
+
+            # 抓页面
+            try:
+                r = session.get(url, timeout=20)
+                self.log(f"      【第{page_num}页】HTTP {r.status_code}，"
+                         f"{len(r.text)} 字节")
+                if r.status_code != 200:
+                    break
+                r.encoding = r.apparent_encoding or "utf-8"
+                html = r.text
+            except Exception as e:
+                self.log(f"      异常：{e}")
+                break
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # 该页无任何候选 → 停止翻页
+            links = soup.select('a[href*="/photos-index-aid-"]')
+            if not links:
+                self.log(f"      第{page_num}页无候选条目，停止翻页")
+                break
+
+            # 解析该页
+            result = self._parse(html, kw, page_num)
+            if result:
+                return result
+
+            # 查找下一页
+            next_url = self._find_next_page(soup, url, page_num)
+            if not next_url:
+                self.log(f"      第{page_num}页无下一页，停止")
+                break
+
+            url = next_url
+            time.sleep(PAGE_DELAY)
+
+        return ""
+
+    def _find_next_page(self, soup, current_url, current_page):
+        """在当前页 HTML 里找"下一页"链接；找不到则尝试构造"""
+        target_p = current_page + 1
+
+        # 策略1：找 href 里 p=<target_p> 的链接
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if re.search(rf'[?&]p={target_p}(?:&|$)', href):
+                if href.startswith("http"):
+                    return href
+                if href.startswith("/"):
+                    return SITE_BASE + href
+
+        # 策略2：找"下一页"文本的链接
+        for a in soup.find_all("a", href=True):
+            txt = a.get_text(strip=True)
+            if txt in ("下一页", "下一頁", "Next", "next", "»", "›", ">"):
+                href = a["href"]
+                if href.startswith("http"):
+                    return href
+                if href.startswith("/"):
+                    return SITE_BASE + href
+
+        # 策略3：构造下一页 URL
+        # 第 1 页格式: /search/?q=XXX
+        # 第 2+ 页格式: /search/index.php?q=XXX&m=&syn=yes&f=_all&s=create_time_DESC&p=N
+        if current_page == 1:
+            m = re.search(r'[?&]q=([^&]+)', current_url)
+            if m:
+                q = m.group(1)
+                return (f"{SITE_BASE}/search/index.php?q={q}"
+                        f"&m=&syn=yes&f=_all&s=create_time_DESC&p={target_p}")
+        else:
+            if re.search(r'[?&]p=\d+', current_url):
+                return re.sub(r'([?&]p=)\d+', rf'\g<1>{target_p}', current_url)
+
+        return None
 
     def _search_done(self):
         self.searching = False
@@ -254,15 +329,14 @@ class App:
             self.right_list.delete(i)
             self.right_list.insert(i, text)
 
-    # ---------- 多结果时取页数最多的 ----------
-    def _parse(self, html, kw):
+    # ---------- 单页解析：多结果取页数最多的 ----------
+    def _parse(self, html, kw, page_num=1):
         soup = BeautifulSoup(html, "html.parser")
         links = soup.select('a[href*="/photos-index-aid-"]')
         if not links:
-            self.log("      · 无 photos-index-aid 链接")
             return ""
 
-        items = []          # [(name, pages), ...]
+        items = []
         seen = set()
         for a in links:
             t = (a.get("title") or a.get_text(strip=True) or "").strip()
@@ -275,11 +349,11 @@ class App:
         if not items:
             return ""
 
-        self.log(f"      · 候选 {len(items)} 个：")
-        for t, p in items[:8]:
+        self.log(f"      第{page_num}页候选 {len(items)} 个：")
+        for t, p in items[:6]:
             self.log(f"          [{p:>4}张] {t[:70]}")
-        if len(items) > 8:
-            self.log(f"          ... 还有 {len(items)-8} 个")
+        if len(items) > 6:
+            self.log(f"          ... 还有 {len(items)-6} 个")
 
         low = kw.lower()
         def sim(t):
@@ -293,16 +367,17 @@ class App:
                              (contains, "包含匹配"),
                              (similar, "相似匹配")):
             if group:
-                group.sort(key=lambda x: -x[1])   # 页数降序
+                group.sort(key=lambda x: -x[1])
                 best = group[0]
-                self.log(f"      ✓ {label}，取页数最多：[{best[1]}张] {best[0][:60]}")
+                self.log(f"      ✓ 第{page_num}页 {label}，取页数最多："
+                         f"[{best[1]}张] {best[0][:60]}")
                 return best[0]
 
-        self.log("      ✗ 相似度不足，视为无匹配")
+        self.log(f"      · 第{page_num}页无匹配，继续下一页")
         return ""
 
     def _extract_pages(self, a_tag):
-        """从链接所在容器里的 .info_col 中提取页数，例如 26張圖片 → 26"""
+        """从链接所在容器里的 .info_col 提取页数，例如 26張圖片 → 26"""
         parent = a_tag
         for _ in range(6):
             parent = parent.parent
@@ -395,7 +470,6 @@ class App:
                 fail.append(f"{old_name}: {e}")
                 self.log(f"  ✗ {old_name}: {e}")
 
-        # 原地更新被重命名的行，其他行保持不变
         for i, new_name in updates:
             self.left_list.delete(i)
             self.left_list.insert(i, new_name)
