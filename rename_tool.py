@@ -17,15 +17,17 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
-# Windows 文件名非法字符
 ILLEGAL = r'[\\/:*?"<>|]'
+TAG_NOTFOUND = "（未找到匹配结果）"
+TAG_FAIL = "[搜索失败]"
+TAG_EMPTY = ""
 
 
 class FileRenameTool:
     def __init__(self, root):
         self.root = root
         self.root.title("批量文件搜索重命名工具")
-        self.root.geometry("1200x720")
+        self.root.geometry("1200x800")
 
         self.directory = ""
         self.files = []
@@ -73,6 +75,15 @@ class FileRenameTool:
         self.check_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.check_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # 日志区
+        log_frame = tk.LabelFrame(self.root, text="日志")
+        log_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.log_text = tk.Text(log_frame, height=7, font=("Consolas", 9), state="disabled")
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
         bottom = tk.Frame(self.root)
         bottom.pack(fill=tk.X, padx=10, pady=8)
         self.status = tk.Label(bottom, text="就绪", fg="gray")
@@ -87,11 +98,22 @@ class FileRenameTool:
         tk.Button(bottom, text="全选", command=self.select_all,
                   width=8).pack(side=tk.RIGHT, padx=3)
 
-        # 长按检测（绑定到整个 checkbox 容器）
         self.check_canvas.bind("<ButtonPress-1>", self._on_press)
         self.check_canvas.bind("<ButtonRelease-1>", self._on_release)
         self.check_inner.bind("<ButtonPress-1>", self._on_press)
         self.check_inner.bind("<ButtonRelease-1>", self._on_release)
+
+    # ============== 日志 ==============
+    def log(self, msg):
+        def _do():
+            self.log_text.configure(state="normal")
+            self.log_text.insert(tk.END, msg + "\n")
+            self.log_text.see(tk.END)
+            self.log_text.configure(state="disabled")
+        if threading.current_thread() is threading.main_thread():
+            _do()
+        else:
+            self.root.after(0, _do)
 
     # ============== 功能 1：读取目录 ==============
     def select_directory(self):
@@ -116,6 +138,8 @@ class FileRenameTool:
             return
         self.new_names = [""] * len(self.files)
         self._refresh_ui()
+        self.log(f"读取目录：{d}")
+        self.log(f"共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
 
     # ============== 功能 2：刷新界面 ==============
@@ -140,7 +164,8 @@ class FileRenameTool:
     def _update_row(self, i):
         if i < self.right_list.size():
             self.right_list.delete(i)
-            self.right_list.insert(i, self.new_names[i] or "（未搜索）")
+            display = self.new_names[i] if self.new_names[i] else "（未搜索）"
+            self.right_list.insert(i, display)
 
     # ============== 长按全选 ==============
     def _on_press(self, event):
@@ -174,6 +199,8 @@ class FileRenameTool:
             messagebox.showwarning("提示", "请先读取文件")
             return
         self.searching = True
+        self.log("=" * 60)
+        self.log("开始搜索...")
         self.status.config(text="正在搜索...", fg="orange")
         threading.Thread(target=self._search_worker, daemon=True).start()
 
@@ -183,66 +210,87 @@ class FileRenameTool:
 
         for i, filename in enumerate(self.files):
             keyword = os.path.splitext(filename)[0]
-            # 去掉常见后缀噪声，提高搜索命中率（可自行调整）
             clean_kw = re.sub(r"[\s\-_]+", " ", keyword).strip()
             url = SEARCH_URL.format(requests.utils.quote(clean_kw))
+            self.log(f"[{i+1}/{len(self.files)}] {filename}")
+            self.log(f"  URL: {url}")
+
             try:
                 r = session.get(url, timeout=20)
-                r.raise_for_status()
-                r.encoding = r.apparent_encoding or "utf-8"
-                result = self._parse_result(r.text, clean_kw)
+                self.log(f"  HTTP {r.status_code}, 长度 {len(r.text)}")
+                if r.status_code != 200:
+                    result = f"{TAG_FAIL} HTTP {r.status_code}"
+                else:
+                    r.encoding = r.apparent_encoding or "utf-8"
+                    result = self._parse_result(r.text, clean_kw)
+                    self.log(f"  解析结果: {result[:80]}")
             except Exception as e:
-                result = f"[搜索失败] {e.__class__.__name__}"
+                result = f"{TAG_FAIL} {e.__class__.__name__}: {e}"
+                self.log(f"  异常: {e}")
+
             self.new_names[i] = result
             self.root.after(0, self._update_row, i)
             self.root.after(0, self.status.config,
                             {"text": f"搜索 {i+1}/{len(self.files)}：{filename}",
                              "fg": "orange"})
-            time.sleep(1)   # 间隔 1 秒
+            time.sleep(1)
 
         self.root.after(0, self._search_done)
 
     def _search_done(self):
         self.searching = False
         self.status.config(text="搜索完成", fg="green")
+        self.log("搜索完成")
 
     def _parse_result(self, html, keyword):
-        """从搜索结果页面提取目标文件名。
-        目标结构: <a href="/photos-index-aid-332613.html" title="XXX">XXX</a>
-        """
         soup = BeautifulSoup(html, "html.parser")
-        links = soup.select('a[href*="/photos-index-aid-"]')
-        if not links:
-            return "（未找到匹配结果）"
 
-        # 提取 title 属性（优先），否则用标签文本
+        # 主要选择器：匹配 <a href="/photos-index-aid-xxx.html" title="...">
+        links = soup.select('a[href*="/photos-index-aid-"]')
+        self.log(f"  · photos-index-aid 链接: {len(links)} 个")
+
+        if not links:
+            # 备用：任何带 title 的链接
+            links = [a for a in soup.find_all("a", href=True)
+                     if a.get("title") and len(a.get("title").strip()) > 2]
+            self.log(f"  · 备用(带 title 的 a): {len(links)} 个")
+
+        if not links:
+            # 再备用：常见容器
+            for sel in [".gallary_item .title a", ".title a", "a.title", ".info_box a"]:
+                links = soup.select(sel)
+                if links:
+                    self.log(f"  · 选择器 {sel}: {len(links)} 个")
+                    break
+
         candidates, seen = [], set()
         for a in links:
             t = (a.get("title") or a.get_text(strip=True) or "").strip()
-            if t and t not in seen:
+            if t and t not in seen and len(t) > 2:
                 seen.add(t)
                 candidates.append(t)
 
+        self.log(f"  · 候选名称: {len(candidates)} 个")
+        if candidates:
+            for c in candidates[:3]:
+                self.log(f"      - {c[:70]}")
+
         if not candidates:
-            return "（未找到匹配结果）"
+            return TAG_NOTFOUND
 
         kw_low = keyword.lower()
-        # 1. 完全匹配
         for c in candidates:
             if c.lower() == kw_low:
                 return c
-        # 2. 包含匹配
         for c in candidates:
             if kw_low in c.lower():
                 return c
-        # 3. 相似度最高
         best = difflib.get_close_matches(keyword, candidates, n=1, cutoff=0.2)
         return best[0] if best else candidates[0]
 
     # ============== 功能 4：确认重命名 ==============
     def _sanitize(self, name):
-        name = re.sub(ILLEGAL, "_", name).strip().rstrip(".")
-        return name
+        return re.sub(ILLEGAL, "_", name).strip().rstrip(".")
 
     def confirm_rename(self):
         selected = [i for i, v in enumerate(self.check_vars) if v.get()]
@@ -250,14 +298,29 @@ class FileRenameTool:
             messagebox.showinfo("提示", "没有勾选任何文件")
             return
 
-        valid = []
+        # 分类统计
+        valid, empty, failed, notfound = [], [], [], []
         for i in selected:
             new = (self.new_names[i] or "").strip()
-            if new and not new.startswith(("[", "（未找到")):
+            if not new:
+                empty.append(i)
+            elif new.startswith(TAG_FAIL):
+                failed.append(i)
+            elif new.startswith("（未找到"):
+                notfound.append(i)
+            else:
                 valid.append(i)
 
         if not valid:
-            messagebox.showinfo("提示", "勾选的文件中，没有可用的新文件名")
+            msg = f"勾选了 {len(selected)} 个文件，但没有可用的新文件名。\n\n"
+            if empty:
+                msg += f"· {len(empty)} 个尚未搜索（请先点击“开始搜索”）\n"
+            if failed:
+                msg += f"· {len(failed)} 个搜索失败（网络/反爬）\n"
+            if notfound:
+                msg += f"· {len(notfound)} 个未找到匹配结果\n"
+            msg += "\n请查看下方日志确认具体原因。"
+            messagebox.showinfo("提示", msg)
             return
 
         preview_lines = []
@@ -267,9 +330,14 @@ class FileRenameTool:
             preview_lines.append(f"... 还有 {len(valid)-12} 个")
         preview = "\n".join(preview_lines)
 
+        extra = ""
+        if empty or failed or notfound:
+            extra = (f"\n\n（另有 {len(empty)} 个未搜索、"
+                     f"{len(failed)} 个搜索失败、{len(notfound)} 个未找到，将跳过）")
+
         if not messagebox.askyesno(
                 "确认重命名",
-                f"即将重命名 {len(valid)} 个文件：\n\n{preview}\n\n确定执行？"):
+                f"即将重命名 {len(valid)} 个文件：\n\n{preview}{extra}\n\n确定执行？"):
             return
 
         ok, fail = 0, []
@@ -281,7 +349,6 @@ class FileRenameTool:
             new_name = new_base if new_base.lower().endswith(ext.lower()) else new_base + ext
             new_path = os.path.join(self.directory, new_name)
 
-            # 避免重名
             if os.path.exists(new_path) and new_path != old_path:
                 stem, e = os.path.splitext(new_name)
                 k = 1
@@ -294,8 +361,10 @@ class FileRenameTool:
                 os.rename(old_path, new_path)
                 self.files[i] = new_name
                 ok += 1
+                self.log(f"重命名: {old_name}  →  {new_name}")
             except Exception as e:
                 fail.append(f"{old_name}: {e}")
+                self.log(f"失败: {old_name} - {e}")
 
         self._refresh_ui()
         msg = f"成功重命名 {ok} 个文件"
@@ -303,6 +372,17 @@ class FileRenameTool:
             msg += f"，失败 {len(fail)} 个"
             messagebox.showwarning("部分失败", "\n".join(fail[:8]))
         self.status.config(text=msg, fg="green")
+
+    # ============== 复选框状态判断辅助（可选） ==============
+    def is_valid_new_name(self, name):
+        if not name:
+            return False
+        name = name.strip()
+        if not name:
+            return False
+        if name.startswith(TAG_FAIL) or name.startswith("（未找到"):
+            return False
+        return True
 
 
 if __name__ == "__main__":
