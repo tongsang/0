@@ -18,10 +18,10 @@ HEADERS = {
 }
 ILLEGAL = r'[\\/:*?"<>|]'
 
-MAX_PAGES = 30       # 单个关键词最多翻多少页（保险上限）
-PAGE_DELAY = 0.6     # 页与页之间的停顿（秒）
-MAX_ITEM_PAGES = 300 # 单条候选页数上限，超过则过滤
-AI_MARKERS = [       # 命中任一标记即过滤
+MAX_PAGES = 30
+PAGE_DELAY = 0.6
+MAX_ITEM_PAGES = 300
+AI_MARKERS = [
     "ai generated", "ai-generated", "ai生成", "ai绘制", "ai繪製",
     "[ai]", "(ai)", "【ai】",
 ]
@@ -53,7 +53,7 @@ class App:
         self.directory = ""
         self.files = []
         self.searching = False
-        self._syncing = False      # 滚动同步的递归保护
+        self._syncing = False
         self._build()
 
     # ---------------- UI ----------------
@@ -71,7 +71,7 @@ class App:
 
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
-        # ---- 左列表 ----
+        # 左列表
         left = tk.LabelFrame(mid, text="① 原始文件名（只读）", font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         lf_left = tk.Frame(left)
@@ -85,10 +85,10 @@ class App:
         self.left_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.left_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # ---- 右列表 ----
+        # 右列表
         right = tk.LabelFrame(
             mid, font=self.font_main,
-            text="② 新文件名 —— 单击选中 / Shift+单击范围选 / Ctrl+单击加选 / 拖动划选")
+            text="② 新文件名 —— 双击 / F2 / 右键可编辑；单击选中，Shift/Ctrl 多选；拖动划选")
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(pad, 0))
         lf_right = tk.Frame(right)
         lf_right.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -102,12 +102,26 @@ class App:
         self.right_list.configure(yscrollcommand=self._on_yscroll_right)
         self.right_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.right_list.bind("<Double-Button-1>", self._edit_right)
 
-        # 鼠标滚轮同步（Windows 下更丝滑）
+        # 编辑绑定
+        self.right_list.bind("<Double-Button-1>", self._edit_right)
+        self.right_list.bind("<F2>", self._edit_current)
+        self.right_list.bind("<Button-3>", self._show_context_menu)
+        # F2 生效需要 listbox 有焦点
+        self.right_list.bind("<Button-1>", lambda e: self.right_list.focus_set(), add="+")
+
+        # 右键菜单
+        self.ctx_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
+        self.ctx_menu.add_command(label="编辑该行 (F2)", command=self._edit_current)
+        self.ctx_menu.add_command(label="复制文本", command=self._copy_current)
+        self.ctx_menu.add_separator()
+        self.ctx_menu.add_command(label="清空该行", command=self._clear_current)
+
+        # 滚轮同步
         self.left_list.bind("<MouseWheel>", self._on_mousewheel)
         self.right_list.bind("<MouseWheel>", self._on_mousewheel)
 
+        # 底部按钮
         bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
         self.status.pack(side=tk.LEFT)
@@ -118,11 +132,14 @@ class App:
         tk.Button(bottom, text="开始搜索", width=12, font=self.font_main,
                   bg="#4CAF50", fg="white",
                   command=self.start_search).pack(side=tk.RIGHT, padx=int(10 * self.scale))
+        tk.Button(bottom, text="编辑选中行", width=12, font=self.font_main,
+                  command=self._edit_current).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="清空选择", width=10, font=self.font_main,
                   command=self.clear_selection).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="全选", width=8, font=self.font_main,
                   command=self.select_all).pack(side=tk.RIGHT, padx=3)
 
+        # 日志
         lf = tk.LabelFrame(self.root, text="日志", font=self.font_main)
         lf.pack(fill=tk.X, padx=pad, pady=(0, int(8 * self.scale)))
         self.log_text = tk.Text(lf, height=12, font=self.font_log, state="disabled")
@@ -163,14 +180,11 @@ class App:
                 at_bottom = self.log_text.yview()[1] >= 0.999
             except Exception:
                 at_bottom = True
-
             self.log_text.configure(state="normal")
             self.log_text.insert(tk.END, str(msg) + "\n")
             self.log_text.configure(state="disabled")
-
             if at_bottom:
                 self.log_text.see(tk.END)
-
         if threading.current_thread() is threading.main_thread():
             _do()
         else:
@@ -217,28 +231,96 @@ class App:
         self.right_list.selection_clear(0, tk.END)
         self.status.config(text="已清空选择", fg="gray")
 
-    # ---------------- 双击编辑右栏 ----------------
+    # ---------------- 手动编辑（核心） ----------------
     def _edit_right(self, event):
+        """双击右栏某行 → 编辑"""
         idx = self.right_list.nearest(event.y)
         if idx < 0:
             return
+        self._open_edit_dialog(idx)
+
+    def _edit_current(self, event=None):
+        """F2 / 按钮 / 右键菜单 → 编辑当前选中行"""
+        sel = self.right_list.curselection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在右侧列表中选中一行")
+            return
+        # 只编辑第一个选中项
+        self._open_edit_dialog(sel[0])
+
+    def _open_edit_dialog(self, idx):
+        """弹出编辑对话框，修改后写回右栏 Listbox"""
+        cur = self.right_list.get(idx)
         dlg = tk.Toplevel(self.root)
-        dlg.title("编辑新文件名")
-        dlg.geometry(f"{int(720*self.scale)}x{int(120*self.scale)}")
+        dlg.title(f"编辑新文件名 —— 第 {idx+1} 行")
+        dlg.geometry(f"{int(820*self.scale)}x{int(150*self.scale)}")
         dlg.transient(self.root)
         dlg.grab_set()
+
+        tk.Label(dlg, text=f"对应文件：{self.left_list.get(idx)}",
+                 font=self.font_main, fg="#555").pack(anchor="w", padx=10, pady=(10, 0))
+
         e = tk.Entry(dlg, font=self.font_main)
         e.pack(fill=tk.X, padx=10, pady=10)
-        e.insert(0, self.right_list.get(idx))
+        e.insert(0, cur)
         e.focus_set()
         e.select_range(0, tk.END)
+        e.icursor(tk.END)
+
         def ok(_=None):
+            new_text = e.get().strip()
             self.right_list.delete(idx)
-            self.right_list.insert(idx, e.get())
+            self.right_list.insert(idx, new_text)
+            # 保留该行的选中状态
+            self.right_list.selection_clear(0, tk.END)
             self.right_list.selection_set(idx)
+            self.right_list.see(idx)
+            self.status.config(text=f"第 {idx+1} 行已更新", fg="blue")
+            self.log(f"  ✎ 第 {idx+1} 行手动修改为：{new_text}")
             dlg.destroy()
-        tk.Button(dlg, text="确定", font=self.font_main, command=ok).pack(pady=5)
+
+        def cancel(_=None):
+            dlg.destroy()
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=5)
+        tk.Button(btn_frame, text="确定", width=10, font=self.font_main,
+                  command=ok).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="取消", width=10, font=self.font_main,
+                  command=cancel).pack(side=tk.LEFT, padx=5)
+
         dlg.bind("<Return>", ok)
+        dlg.bind("<Escape>", cancel)
+
+    def _copy_current(self):
+        sel = self.right_list.curselection()
+        if not sel:
+            return
+        text = self.right_list.get(sel[0])
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.config(text="已复制到剪贴板", fg="blue")
+
+    def _clear_current(self):
+        sel = self.right_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self.right_list.delete(idx)
+        self.right_list.insert(idx, "")
+        self.log(f"  ⌫ 第 {idx+1} 行已清空")
+
+    def _show_context_menu(self, event):
+        idx = self.right_list.nearest(event.y)
+        if idx >= 0:
+            # 如果该行没选中，就选中它
+            if idx not in self.right_list.curselection():
+                self.right_list.selection_clear(0, tk.END)
+                self.right_list.selection_set(idx)
+        try:
+            self.ctx_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.ctx_menu.grab_release()
 
     # ---------------- 搜索 ----------------
     def start_search(self):
@@ -272,7 +354,8 @@ class App:
 
             self.log(f"    → 最终：{result if result else '（无匹配，跳过）'}")
 
-            self.root.after(0, self._set_right, i, result)
+            # 只在右栏当前为空时填入，避免覆盖用户手动编辑的内容
+            self.root.after(0, self._set_right_if_empty, i, result)
             self.root.after(0, self.status.config,
                             {"text": f"搜索 {i+1}/{total}", "fg": "orange"})
             time.sleep(1)
@@ -281,15 +364,19 @@ class App:
 
     def _search_done(self):
         self.searching = False
-        self.status.config(text="搜索完成，请在右侧列表中选中要重命名的行", fg="green")
+        self.status.config(text="搜索完成，可双击右侧编辑，再选中要重命名的行", fg="green")
         self.log("=== 搜索完成 ===")
 
-    def _set_right(self, i, text):
-        if i < self.right_list.size():
+    def _set_right_if_empty(self, i, text):
+        """仅当该行右栏为空时写入搜索结果，保护用户手动编辑的内容"""
+        if i >= self.right_list.size():
+            return
+        cur = (self.right_list.get(i) or "").strip()
+        if not cur:
             self.right_list.delete(i)
             self.right_list.insert(i, text)
 
-    # ---------- 逐页搜索：?q=关键词 → ?q=关键词&p=2 → … 直到无新条目 ----------
+    # ---------- 逐页搜索 ----------
     def _search_one(self, session, keyword_raw):
         kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
         if not kw:
@@ -333,12 +420,10 @@ class App:
                 t = (a.get("title") or a.get_text(strip=True) or "").strip()
                 if not t or t in page_seen:
                     continue
-                # 过滤 AI Generated
                 if self._is_ai_generated(t):
                     filtered_ai += 1
                     continue
                 pages = self._extract_pages(a)
-                # 过滤超过 300 页
                 if pages > MAX_ITEM_PAGES:
                     filtered_big += 1
                     continue
@@ -376,7 +461,6 @@ class App:
         low = t.lower()
         return any(m in low for m in AI_MARKERS)
 
-    # ---------- 从全部候选中挑选 ----------
     def _pick_best(self, items, kw):
         low = kw.lower()
         def sim(t):
@@ -435,14 +519,15 @@ class App:
                 "右侧列表里没有选中任何行。\n\n"
                 "请先在右侧列表中选中要重命名的行：\n"
                 "· 单击 = 选中一行\n"
-                "· Shift + 单击 = 范围选中（框选）\n"
+                "· Shift + 单击 = 范围选中\n"
                 "· Ctrl + 单击 = 加选\n"
-                "· 或点“全选”按钮")
+                "· 双击 / F2 = 手动编辑该行")
             return
 
         tasks = []
         for i in sel:
             old_name = self.left_list.get(i)
+            # ★ 直接取右栏当前显示文字 —— 无论来自搜索还是手动编辑，都是最终值
             new_raw = (self.right_list.get(i) or "").strip()
             if not new_raw:
                 self.log(f"  [跳过] 第 {i+1} 行右栏为空：{old_name}")
