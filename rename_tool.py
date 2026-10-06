@@ -27,8 +27,9 @@ AI_MARKERS = [
     "ai generated", "ai-generated", "ai生成", "ai绘制", "ai繪製",
     "[ai]", "(ai)", "【ai】",
 ]
-HL_BG = "#1976D2"      # 高亮背景色（蓝）
-HL_FG = "white"        # 高亮前景色（白）
+HL_BG = "#1976D2"
+HL_FG = "white"
+OPEN_ICON = "📂"
 
 
 class App:
@@ -55,18 +56,29 @@ class App:
         self.font_log  = ("Consolas", self.fs_log)
 
         self.directory = ""
-        self.files = []                # 磁盘实际文件名（含扩展名）
+        self.files = []
         self.searching = False
         self._syncing = False
-        self._hl_left_idx = None
-        self._ctx_left_idx = None
-        self._ctx_right_idx = None
+        self._last_open_time = 0.0
 
         self._build()
 
     # ---------------- UI ----------------
     def _build(self):
         pad = int(10 * self.scale)
+
+        # Treeview 样式
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("Treeview", font=self.font_main,
+                        rowheight=int(28 * self.scale))
+        style.configure("Treeview.Heading", font=self.font_main)
+        style.map("Treeview",
+                  background=[("selected", HL_BG)],
+                  foreground=[("selected", HL_FG)])
 
         top = tk.Frame(self.root); top.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         tk.Label(top, text="目录：", font=self.font_main).pack(side=tk.LEFT)
@@ -79,74 +91,95 @@ class App:
 
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
-        # 左列表
-        left = tk.LabelFrame(mid, text="① 原始文件名（不含后缀，双击可编辑，右键可打开）",
+        # ---- 左 Treeview ----
+        left = tk.LabelFrame(mid,
+                             text="① 原始文件名（双击内联编辑，点 📂 打开）",
                              font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         lf_left = tk.Frame(left)
         lf_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.left_list = tk.Listbox(lf_left, font=self.font_main,
-                                    selectmode=tk.NONE, activestyle="none",
-                                    exportselection=False)
-        self.left_sb = ttk.Scrollbar(lf_left, orient="vertical",
-                                     command=self.left_list.yview)
-        self.left_list.configure(yscrollcommand=self._on_yscroll_left)
-        self.left_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.left_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.left_tree = ttk.Treeview(lf_left, columns=("name", "open"),
+                                      show="headings", selectmode="browse")
+        self.left_tree.heading("name", text="原始文件名")
+        self.left_tree.heading("open", text="打开")
+        self.left_tree.column("name", width=int(280 * self.scale), anchor="w")
+        self.left_tree.column("open", width=int(56 * self.scale),
+                              anchor="center", stretch=False)
 
-        # 右列表
-        right = tk.LabelFrame(
-            mid, font=self.font_main,
-            text="② 新文件名 —— 双击 / F2 / 右键可编辑；单击选中，Shift/Ctrl 多选；拖动划选")
+        self.left_sb = ttk.Scrollbar(lf_left, orient="vertical",
+                                     command=self.left_tree.yview)
+        self.left_tree.configure(yscrollcommand=self._on_yscroll_left)
+        self.left_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.left_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # ---- 右 Treeview ----
+        right = tk.LabelFrame(mid,
+                              text="② 新文件名（双击内联编辑，点 📂 打开；Shift/Ctrl 多选）",
+                              font=self.font_main)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(pad, 0))
         lf_right = tk.Frame(right)
         lf_right.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.right_list = tk.Listbox(
-            lf_right, font=self.font_main, fg="#1565C0",
-            selectmode=tk.EXTENDED, selectbackground=HL_BG,
-            selectforeground=HL_FG, exportselection=False)
+        self.right_tree = ttk.Treeview(lf_right, columns=("name", "open"),
+                                       show="headings", selectmode="extended")
+        self.right_tree.heading("name", text="新文件名")
+        self.right_tree.heading("open", text="打开")
+        self.right_tree.column("name", width=int(280 * self.scale), anchor="w")
+        self.right_tree.column("open", width=int(56 * self.scale),
+                               anchor="center", stretch=False)
+
         self.right_sb = ttk.Scrollbar(lf_right, orient="vertical",
-                                      command=self.right_list.yview)
-        self.right_list.configure(yscrollcommand=self._on_yscroll_right)
+                                      command=self.right_tree.yview)
+        self.right_tree.configure(yscrollcommand=self._on_yscroll_right)
         self.right_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.right_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.right_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # ---- 事件绑定 ----
-        # 左侧：单击联动 + 双击编辑 + 右键菜单
-        self.left_list.bind("<Button-1>", self._on_left_click)
-        self.left_list.bind("<Double-Button-1>", self._edit_left)
-        self.left_list.bind("<Button-3>", self._show_left_menu)
+        # ---- 事件 ----
+        self.left_tree.bind("<<TreeviewSelect>>", self._on_left_select)
+        self.left_tree.bind("<Button-1>",
+                            lambda e: self._on_click(e, self.left_tree), add="+")
+        self.left_tree.bind("<Double-1>",
+                            lambda e: self._on_double(e, self.left_tree, "L"))
+        self.left_tree.bind("<MouseWheel>", self._on_mousewheel)
 
-        # 右侧
-        self.right_list.bind("<<ListboxSelect>>", self._on_right_select)
-        self.right_list.bind("<Double-Button-1>", self._edit_right)
-        self.right_list.bind("<F2>", self._edit_current)
-        self.right_list.bind("<Button-3>", self._show_right_menu)
-        self.right_list.bind("<Button-1>",
-                             lambda e: self.right_list.focus_set(), add="+")
+        self.right_tree.bind("<<TreeviewSelect>>", self._on_right_select)
+        self.right_tree.bind("<Button-1>",
+                             lambda e: self._on_click(e, self.right_tree), add="+")
+        self.right_tree.bind("<Double-1>",
+                             lambda e: self._on_double(e, self.right_tree, "R"))
+        self.right_tree.bind("<MouseWheel>", self._on_mousewheel)
+        self.right_tree.bind("<F2>", lambda e: self._edit_current_tree("R"))
 
-        # 右键菜单 —— 左
+        # ---- 右键菜单（无"打开"） ----
         self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
-        self.ctx_left_menu.add_command(label="打开文件", command=self._open_left_file)
-        self.ctx_left_menu.add_command(label="编辑该行", command=self._edit_left_current)
-        self.ctx_left_menu.add_command(label="复制文件名", command=self._copy_left_name)
+        self.ctx_left_menu.add_command(label="编辑该行",
+                                       command=lambda: self._edit_current_tree("L"))
+        self.ctx_left_menu.add_command(label="复制文件名",
+                                       command=lambda: self._copy_current_tree("L"))
+        self.ctx_left_menu.add_separator()
+        self.ctx_left_menu.add_command(label="清空该行",
+                                       command=lambda: self._clear_current_tree("L"))
 
-        # 右键菜单 —— 右
-        self.ctx_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
-        self.ctx_menu.add_command(label="打开对应文件", command=self._open_right_file)
-        self.ctx_menu.add_separator()
-        self.ctx_menu.add_command(label="编辑该行 (F2)", command=self._edit_current)
-        self.ctx_menu.add_command(label="复制文本", command=self._copy_current)
-        self.ctx_menu.add_command(label="清空该行", command=self._clear_current)
+        self.ctx_right_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
+        self.ctx_right_menu.add_command(label="编辑该行",
+                                        command=lambda: self._edit_current_tree("R"))
+        self.ctx_right_menu.add_command(label="复制文本",
+                                        command=lambda: self._copy_current_tree("R"))
+        self.ctx_right_menu.add_separator()
+        self.ctx_right_menu.add_command(label="清空该行",
+                                        command=lambda: self._clear_current_tree("R"))
 
-        # 滚轮同步
-        self.left_list.bind("<MouseWheel>", self._on_mousewheel)
-        self.right_list.bind("<MouseWheel>", self._on_mousewheel)
+        self.left_tree.bind("<Button-3>",
+                            lambda e: self._show_menu(e, self.left_tree,
+                                                      self.ctx_left_menu))
+        self.right_tree.bind("<Button-3>",
+                             lambda e: self._show_menu(e, self.right_tree,
+                                                       self.ctx_right_menu))
 
-        # 底部
-        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
+        # ---- 底部按钮 ----
+        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad,
+                                                  pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
         self.status.pack(side=tk.LEFT)
 
@@ -155,15 +188,16 @@ class App:
                   command=self.confirm_rename).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="开始搜索", width=12, font=self.font_main,
                   bg="#4CAF50", fg="white",
-                  command=self.start_search).pack(side=tk.RIGHT, padx=int(10 * self.scale))
+                  command=self.start_search).pack(side=tk.RIGHT,
+                                                  padx=int(10 * self.scale))
         tk.Button(bottom, text="编辑选中行", width=12, font=self.font_main,
-                  command=self._edit_current).pack(side=tk.RIGHT, padx=3)
+                  command=lambda: self._edit_current_tree("R")).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="清空选择", width=10, font=self.font_main,
                   command=self.clear_selection).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="全选", width=8, font=self.font_main,
                   command=self.select_all).pack(side=tk.RIGHT, padx=3)
 
-        # 日志
+        # ---- 日志 ----
         lf = tk.LabelFrame(self.root, text="日志", font=self.font_main)
         lf.pack(fill=tk.X, padx=pad, pady=(0, int(8 * self.scale)))
         self.log_text = tk.Text(lf, height=12, font=self.font_log, state="disabled")
@@ -172,50 +206,177 @@ class App:
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ---------------- 联动高亮 & 日志跳转 ----------------
-    def _set_left_highlight(self, idx):
-        if self._hl_left_idx is not None and self._hl_left_idx != idx:
-            try:
-                self.left_list.itemconfig(self._hl_left_idx,
-                                          background="", foreground="")
-            except Exception:
-                pass
-        try:
-            self.left_list.itemconfig(idx, background=HL_BG, foreground=HL_FG)
-            self._hl_left_idx = idx
-        except Exception:
-            pass
+    # ---------------- 内联编辑 ----------------
+    def _start_cell_edit(self, tree, item, side):
+        bbox = tree.bbox(item, "#1")
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        cur = tree.set(item, "name")
+        entry = tk.Entry(tree, font=self.font_main, borderwidth=1,
+                         relief="solid", bg="#FFFDE7")
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.delete(0, tk.END)
+        entry.insert(0, cur)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        entry.icursor(tk.END)
 
-    def _select_right_index(self, idx):
+        finished = [False]
+
+        def finish(e=None):
+            if finished[0]:
+                return
+            finished[0] = True
+            val = entry.get().strip()
+            entry.destroy()
+            self._after_cell_edit(tree, item, side, val)
+
+        def cancel(e=None):
+            if finished[0]:
+                return
+            finished[0] = True
+            entry.destroy()
+
+        entry.bind("<Return>", finish)
+        entry.bind("<Escape>", cancel)
+        entry.bind("<FocusOut>", finish)
+
+    def _after_cell_edit(self, tree, item, side, new_val):
+        idx = int(item)
+        tree.set(item, "name", new_val)
+        if side == "L":
+            self.log(f"  ✎ 第 {idx+1} 行 原文件名 → {new_val}")
+            # ★ 编辑左侧后，同步刷新右侧为编辑后的内容
+            if self.right_tree.exists(item):
+                self.right_tree.set(item, "name", new_val)
+            if idx < len(self.files):
+                self._jump_log(self.files[idx])
+        else:
+            self.log(f"  ✎ 第 {idx+1} 行 新文件名 → {new_val}")
+
+    def _on_double(self, event, tree, side):
+        region = tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = tree.identify_column(event.x)
+        if col != "#1":
+            return
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        self._start_cell_edit(tree, item, side)
+
+    def _edit_current_tree(self, side):
+        tree = self.left_tree if side == "L" else self.right_tree
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中一行")
+            return
+        self._start_cell_edit(tree, sel[0], side)
+
+    def _copy_current_tree(self, side):
+        tree = self.left_tree if side == "L" else self.right_tree
+        sel = tree.selection()
+        if not sel:
+            return
+        text = tree.set(sel[0], "name")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.config(text="已复制到剪贴板", fg="blue")
+
+    def _clear_current_tree(self, side):
+        tree = self.left_tree if side == "L" else self.right_tree
+        sel = tree.selection()
+        if not sel:
+            return
+        item = sel[0]
+        tree.set(item, "name", "")
+        self.log(f"  ⌫ 第 {int(item)+1} 行已清空")
+
+    def _show_menu(self, event, tree, menu):
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        if item not in tree.selection():
+            tree.selection_set(item)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # ---------------- 打开文件（点 📂 列） ----------------
+    def _on_click(self, event, tree):
+        region = tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return None
+        col = tree.identify_column(event.x)
+        if col != "#2":
+            return None
+        item = tree.identify_row(event.y)
+        if not item:
+            return None
+        # 防抖：双击时不重复打开
+        now = time.time()
+        if now - self._last_open_time < 0.5:
+            return "break"
+        self._last_open_time = now
+        self._open_file_at(int(item))
+        return "break"
+
+    def _open_file_at(self, idx):
+        if not self.directory:
+            messagebox.showwarning("提示", "请先读取目录")
+            return
+        if idx < 0 or idx >= len(self.files):
+            return
+        path = os.path.join(self.directory, self.files[idx])
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"文件不存在：\n{path}")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+            self.status.config(text=f"已打开：{self.files[idx]}", fg="blue")
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开：{e}")
+
+    # ---------------- 左右联动 ----------------
+    def _on_left_select(self, event=None):
+        if self._syncing:
+            return
+        sel = self.left_tree.selection()
+        if not sel:
+            return
+        item = sel[0]
         self._syncing = True
         try:
-            self.right_list.selection_clear(0, tk.END)
-            self.right_list.selection_set(idx)
-            self.right_list.see(idx)
+            self.right_tree.selection_set(item)
+            self.right_tree.see(item)
         finally:
             self._syncing = False
-
-    def _on_left_click(self, event):
-        idx = self.left_list.nearest(event.y)
-        if idx < 0 or idx >= self.left_list.size():
-            return
-        self._set_left_highlight(idx)
-        self._select_right_index(idx)
+        idx = int(item)
         if idx < len(self.files):
             self._jump_log(self.files[idx])
 
-    def _on_right_select(self, event):
+    def _on_right_select(self, event=None):
         if self._syncing:
             return
-        sel = self.right_list.curselection()
+        sel = self.right_tree.selection()
         if not sel:
             return
-        idx = sel[0]
-        self._set_left_highlight(idx)
+        item = sel[0]
+        self._syncing = True
         try:
-            self.left_list.see(idx)
-        except Exception:
-            pass
+            self.left_tree.selection_set(item)
+            self.left_tree.see(item)
+        finally:
+            self._syncing = False
+        idx = int(item)
         if idx < len(self.files):
             self._jump_log(self.files[idx])
 
@@ -228,7 +389,6 @@ class App:
             total_lines = 0
         if total_lines <= 1:
             return
-
         pos = None
         try:
             pos = self.log_text.search(f"] {filename}", "1.0",
@@ -245,7 +405,6 @@ class App:
                     pos = None
         if not pos:
             return
-
         try:
             line = int(pos.split(".")[0])
             state = self.log_text.cget("state")
@@ -262,26 +421,28 @@ class App:
     # ---------------- 滚动同步 ----------------
     def _on_yscroll_left(self, first, last):
         self.left_sb.set(first, last)
-        if not self._syncing:
-            self._syncing = True
-            try:
-                self.right_list.yview_moveto(first)
-            finally:
-                self._syncing = False
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self.right_tree.yview_moveto(first)
+        finally:
+            self._syncing = False
 
     def _on_yscroll_right(self, first, last):
         self.right_sb.set(first, last)
-        if not self._syncing:
-            self._syncing = True
-            try:
-                self.left_list.yview_moveto(first)
-            finally:
-                self._syncing = False
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            self.left_tree.yview_moveto(first)
+        finally:
+            self._syncing = False
 
     def _on_mousewheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self.left_list.yview_scroll(step, "units")
-        self.right_list.yview_scroll(step, "units")
+        self.left_tree.yview_scroll(step, "units")
+        self.right_tree.yview_scroll(step, "units")
         return "break"
 
     # ---------------- 日志 ----------------
@@ -300,45 +461,6 @@ class App:
             _do()
         else:
             self.root.after(0, _do)
-
-    # ---------------- 打开文件 ----------------
-    def _open_file_at(self, idx):
-        if not self.directory:
-            messagebox.showwarning("提示", "请先读取目录")
-            return
-        if idx < 0 or idx >= len(self.files):
-            return
-        path = os.path.join(self.directory, self.files[idx])
-        if not os.path.exists(path):
-            messagebox.showwarning("提示", f"文件不存在：\n{path}")
-            return
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
-        except Exception as e:
-            messagebox.showerror("错误", f"无法打开：{e}")
-
-    def _open_left_file(self):
-        if self._ctx_left_idx is None:
-            return
-        self._open_file_at(self._ctx_left_idx)
-
-    def _open_right_file(self):
-        if self._ctx_right_idx is None:
-            return
-        self._open_file_at(self._ctx_right_idx)
-
-    def _copy_left_name(self):
-        if self._ctx_left_idx is None:
-            return
-        text = self.left_list.get(self._ctx_left_idx)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.status.config(text="已复制文件名", fg="blue")
 
     # ---------------- 目录 ----------------
     def select_dir(self):
@@ -360,192 +482,30 @@ class App:
             messagebox.showerror("错误", str(e))
             return
 
-        self.left_list.delete(0, tk.END)
-        self.right_list.delete(0, tk.END)
-        self._hl_left_idx = None
-        for f in self.files:
-            stem = os.path.splitext(f)[0]    # 去掉扩展名
-            self.left_list.insert(tk.END, stem)
-            self.right_list.insert(tk.END, "")
+        self.left_tree.delete(*self.left_tree.get_children())
+        self.right_tree.delete(*self.right_tree.get_children())
+        for i, f in enumerate(self.files):
+            stem = os.path.splitext(f)[0]
+            iid = str(i)
+            self.left_tree.insert("", tk.END, iid=iid,
+                                  values=(stem, OPEN_ICON))
+            self.right_tree.insert("", tk.END, iid=iid,
+                                   values=("", OPEN_ICON))
         self.log(f"读取目录：{d}，共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
 
     # ---------------- 全选 / 清空 ----------------
     def select_all(self):
-        n = self.right_list.size()
-        if n == 0:
+        items = self.right_tree.get_children()
+        if not items:
             return
-        self.right_list.selection_set(0, tk.END)
-        self.right_list.see(0)
-        self.status.config(text=f"已选中 {n} 行", fg="blue")
+        self.right_tree.selection_set(items)
+        self.right_tree.see(items[0])
+        self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
 
     def clear_selection(self):
-        self.right_list.selection_clear(0, tk.END)
+        self.right_tree.selection_remove(*self.right_tree.selection())
         self.status.config(text="已清空选择", fg="gray")
-
-    # ---------------- 左栏编辑（新增） ----------------
-    def _edit_left(self, event):
-        idx = self.left_list.nearest(event.y)
-        if idx < 0:
-            return
-        self._open_left_edit_dialog(idx)
-
-    def _edit_left_current(self):
-        if self._ctx_left_idx is None:
-            return
-        self._open_left_edit_dialog(self._ctx_left_idx)
-
-    def _open_left_edit_dialog(self, idx):
-        cur = self.left_list.get(idx)
-        disk = self.files[idx] if idx < len(self.files) else ""
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"编辑原始文件名（不含后缀） —— 第 {idx+1} 行")
-        dlg.geometry(f"{int(820*self.scale)}x{int(180*self.scale)}")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        tk.Label(dlg, text=f"磁盘文件：{disk}",
-                 font=self.font_main, fg="#555").pack(anchor="w", padx=10, pady=(10, 0))
-        tk.Label(dlg, text="修改文件名主体（扩展名不变，重命名时自动保留）：",
-                 font=self.font_main, fg="#333").pack(anchor="w", padx=10, pady=(5, 0))
-
-        e = tk.Entry(dlg, font=self.font_main)
-        e.pack(fill=tk.X, padx=10, pady=10)
-        e.insert(0, cur)
-        e.focus_set()
-        e.select_range(0, tk.END)
-        e.icursor(tk.END)
-
-        def ok(_=None):
-            new_text = e.get().strip()
-            self.left_list.delete(idx)
-            self.left_list.insert(idx, new_text)
-            self._set_left_highlight(idx)
-            self.status.config(text=f"第 {idx+1} 行已更新", fg="blue")
-            self.log(f"  ✎ 第 {idx+1} 行原文件名手动修改为：{new_text}")
-            dlg.destroy()
-
-        def cancel(_=None):
-            dlg.destroy()
-
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(pady=5)
-        tk.Button(btn_frame, text="确定", width=10, font=self.font_main,
-                  command=ok).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="取消", width=10, font=self.font_main,
-                  command=cancel).pack(side=tk.LEFT, padx=5)
-
-        dlg.bind("<Return>", ok)
-        dlg.bind("<Escape>", cancel)
-
-    # ---------------- 右栏编辑 ----------------
-    def _edit_right(self, event):
-        idx = self.right_list.nearest(event.y)
-        if idx < 0:
-            return
-        self._open_edit_dialog(idx)
-
-    def _edit_current(self, event=None):
-        sel = self.right_list.curselection()
-        if not sel:
-            messagebox.showinfo("提示", "请先在右侧列表中选中一行")
-            return
-        self._open_edit_dialog(sel[0])
-
-    def _open_edit_dialog(self, idx):
-        cur = self.right_list.get(idx)
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"编辑新文件名 —— 第 {idx+1} 行")
-        dlg.geometry(f"{int(820*self.scale)}x{int(150*self.scale)}")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        tk.Label(dlg, text=f"对应文件：{self.left_list.get(idx)}",
-                 font=self.font_main, fg="#555").pack(anchor="w", padx=10, pady=(10, 0))
-
-        e = tk.Entry(dlg, font=self.font_main)
-        e.pack(fill=tk.X, padx=10, pady=10)
-        e.insert(0, cur)
-        e.focus_set()
-        e.select_range(0, tk.END)
-        e.icursor(tk.END)
-
-        def ok(_=None):
-            new_text = e.get().strip()
-            self.right_list.delete(idx)
-            self.right_list.insert(idx, new_text)
-            self.right_list.selection_clear(0, tk.END)
-            self.right_list.selection_set(idx)
-            self.right_list.see(idx)
-            self.status.config(text=f"第 {idx+1} 行已更新", fg="blue")
-            self.log(f"  ✎ 第 {idx+1} 行新文件名手动修改为：{new_text}")
-            dlg.destroy()
-
-        def cancel(_=None):
-            dlg.destroy()
-
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(pady=5)
-        tk.Button(btn_frame, text="确定", width=10, font=self.font_main,
-                  command=ok).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="取消", width=10, font=self.font_main,
-                  command=cancel).pack(side=tk.LEFT, padx=5)
-
-        dlg.bind("<Return>", ok)
-        dlg.bind("<Escape>", cancel)
-
-    def _copy_current(self):
-        sel = self.right_list.curselection()
-        if not sel:
-            return
-        text = self.right_list.get(sel[0])
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.status.config(text="已复制到剪贴板", fg="blue")
-
-    def _clear_current(self):
-        sel = self.right_list.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        self.right_list.delete(idx)
-        self.right_list.insert(idx, "")
-        self.log(f"  ⌫ 第 {idx+1} 行已清空")
-
-    # ---------------- 右键菜单 ----------------
-    def _show_left_menu(self, event):
-        idx = self.left_list.nearest(event.y)
-        if idx < 0:
-            return
-        self._ctx_left_idx = idx
-        self._set_left_highlight(idx)
-        self._select_right_index(idx)
-        if idx < len(self.files):
-            self._jump_log(self.files[idx])
-        try:
-            self.ctx_left_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.ctx_left_menu.grab_release()
-
-    def _show_right_menu(self, event):
-        idx = self.right_list.nearest(event.y)
-        if idx < 0:
-            return
-        self._ctx_right_idx = idx
-        if idx not in self.right_list.curselection():
-            self._syncing = True
-            try:
-                self.right_list.selection_clear(0, tk.END)
-                self.right_list.selection_set(idx)
-            finally:
-                self._syncing = False
-            self._set_left_highlight(idx)
-            if idx < len(self.files):
-                self._jump_log(self.files[idx])
-        try:
-            self.ctx_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.ctx_menu.grab_release()
 
     # ---------------- 搜索 ----------------
     def start_search(self):
@@ -588,16 +548,16 @@ class App:
 
     def _search_done(self):
         self.searching = False
-        self.status.config(text="搜索完成，可双击右侧编辑，再选中要重命名的行", fg="green")
+        self.status.config(text="搜索完成，可双击任一侧编辑，选中行后确认重命名", fg="green")
         self.log("=== 搜索完成 ===")
 
     def _set_right_if_empty(self, i, text):
-        if i >= self.right_list.size():
+        item = str(i)
+        if not self.right_tree.exists(item):
             return
-        cur = (self.right_list.get(i) or "").strip()
+        cur = (self.right_tree.set(item, "name") or "").strip()
         if not cur:
-            self.right_list.delete(i)
-            self.right_list.insert(i, text)
+            self.right_tree.set(item, "name", text)
 
     # ---------- 逐页搜索 ----------
     def _search_one(self, session, keyword_raw):
@@ -733,7 +693,7 @@ class App:
 
     # ---------------- 确认重命名 ----------------
     def confirm_rename(self):
-        sel = self.right_list.curselection()
+        sel = self.right_tree.selection()
         self.log(f"=== 确认重命名，选中 {len(sel)} 行 ===")
 
         if not sel:
@@ -744,28 +704,28 @@ class App:
                 "· 单击 = 选中一行\n"
                 "· Shift + 单击 = 范围选中\n"
                 "· Ctrl + 单击 = 加选\n"
-                "· 双击 / F2 = 手动编辑该行")
+                "· 双击 = 直接编辑该行")
             return
 
         tasks = []
-        for i in sel:
+        for item in sel:
+            i = int(item)
             if i >= len(self.files):
                 continue
-            old_disk_name = self.files[i]                       # 磁盘实际名（含扩展名）
-            old_stem, ext = os.path.splitext(old_disk_name)
-            left_text  = (self.left_list.get(i) or "").strip()  # 左栏当前显示（不含后缀）
-            right_text = (self.right_list.get(i) or "").strip() # 右栏当前显示
+            old_disk = self.files[i]
+            old_stem, ext = os.path.splitext(old_disk)
+            left_text  = (self.left_tree.set(item, "name") or "").strip()
+            right_text = (self.right_tree.set(item, "name") or "").strip()
 
-            # 新文件名来源：右栏优先，右栏空则用左栏（如果左栏被编辑过）
             if right_text:
                 new_raw = right_text
             elif left_text and left_text != old_stem:
                 new_raw = left_text
             else:
-                self.log(f"  [跳过] 第 {i+1} 行无变化：{old_disk_name}")
+                self.log(f"  [跳过] 第 {i+1} 行无变化：{old_disk}")
                 continue
 
-            tasks.append((i, old_disk_name, ext, new_raw))
+            tasks.append((i, old_disk, ext, new_raw))
 
         if not tasks:
             messagebox.showinfo(
@@ -789,10 +749,9 @@ class App:
         ok_n, fail = 0, []
         updates = []
 
-        for i, old_disk_name, ext, new_raw in tasks:
-            old_path = os.path.join(self.directory, old_disk_name)
+        for i, old_disk, ext, new_raw in tasks:
+            old_path = os.path.join(self.directory, old_disk)
             new_base = re.sub(ILLEGAL, "_", new_raw).strip().rstrip(".") or "unnamed"
-            # 保留原扩展名
             if not new_base.lower().endswith(ext.lower()):
                 new_name = new_base + ext
             else:
@@ -800,7 +759,7 @@ class App:
             new_path = os.path.join(self.directory, new_name)
 
             if os.path.normcase(new_path) == os.path.normcase(old_path):
-                self.log(f"  - 名称相同跳过：{old_disk_name}")
+                self.log(f"  - 名称相同跳过：{old_disk}")
                 continue
 
             if os.path.exists(new_path):
@@ -815,24 +774,20 @@ class App:
                 os.rename(old_path, new_path)
                 ok_n += 1
                 updates.append((i, new_name))
-                self.log(f"  ✓ {old_disk_name}  →  {new_name}")
+                self.log(f"  ✓ {old_disk}  →  {new_name}")
             except Exception as e:
-                fail.append(f"{old_disk_name}: {e}")
-                self.log(f"  ✗ {old_disk_name}: {e}")
+                fail.append(f"{old_disk}: {e}")
+                self.log(f"  ✗ {old_disk}: {e}")
 
-        # 原地更新：左栏显示新名（去扩展名），右栏清空
+        # 原地更新（不重新加载目录，保护其他行的手动修改）
         for i, new_name in updates:
             self.files[i] = new_name
             new_stem = os.path.splitext(new_name)[0]
-            self.left_list.delete(i)
-            self.left_list.insert(i, new_stem)
-            self.right_list.delete(i)
-            self.right_list.insert(i, "")
-            # 若更新后的行是当前高亮行，重新上色
-            if self._hl_left_idx == i:
-                self.left_list.itemconfig(i, background=HL_BG, foreground=HL_FG)
+            item = str(i)
+            self.left_tree.set(item, "name", new_stem)
+            self.right_tree.set(item, "name", "")
 
-        self.right_list.selection_clear(0, tk.END)
+        self.right_tree.selection_remove(*self.right_tree.selection())
 
         msg = f"成功重命名 {ok_n} 个文件"
         if fail:
