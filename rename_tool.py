@@ -1,7 +1,9 @@
 import os
 import re
+import sys
 import time
 import threading
+import subprocess
 import difflib
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -25,6 +27,7 @@ AI_MARKERS = [
     "ai generated", "ai-generated", "ai生成", "ai绘制", "ai繪製",
     "[ai]", "(ai)", "【ai】",
 ]
+HL_COLOR = "#FFF59D"   # 左栏联动高亮色
 
 
 class App:
@@ -54,6 +57,10 @@ class App:
         self.files = []
         self.searching = False
         self._syncing = False
+        self._hl_left_idx = None      # 左栏当前高亮行
+        self._ctx_left_idx = None     # 左栏右键目标行
+        self._ctx_right_idx = None    # 右栏右键目标行
+
         self._build()
 
     # ---------------- UI ----------------
@@ -72,13 +79,14 @@ class App:
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
         # 左列表
-        left = tk.LabelFrame(mid, text="① 原始文件名（只读）", font=self.font_main)
+        left = tk.LabelFrame(mid, text="① 原始文件名（只读，右键可打开）", font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         lf_left = tk.Frame(left)
         lf_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self.left_list = tk.Listbox(lf_left, font=self.font_main,
-                                    selectmode=tk.NONE, activestyle="none")
+                                    selectmode=tk.NONE, activestyle="none",
+                                    exportselection=False)
         self.left_sb = ttk.Scrollbar(lf_left, orient="vertical",
                                      command=self.left_list.yview)
         self.left_list.configure(yscrollcommand=self._on_yscroll_left)
@@ -96,25 +104,38 @@ class App:
         self.right_list = tk.Listbox(
             lf_right, font=self.font_main, fg="#1565C0",
             selectmode=tk.EXTENDED, selectbackground="#1976D2",
-            selectforeground="white")
+            selectforeground="white", exportselection=False)
         self.right_sb = ttk.Scrollbar(lf_right, orient="vertical",
                                       command=self.right_list.yview)
         self.right_list.configure(yscrollcommand=self._on_yscroll_right)
         self.right_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 编辑绑定
+        # ---- 事件绑定 ----
+        # 左侧：单击联动 + 右键菜单
+        self.left_list.bind("<Button-1>", self._on_left_click)
+        self.left_list.bind("<Button-3>", self._show_left_menu)
+
+        # 右侧：选中联动（<<ListboxSelect>> 涵盖 单击/Shift/Ctrl/拖动）
+        self.right_list.bind("<<ListboxSelect>>", self._on_right_select)
+        # 双击编辑 / F2 / 右键
         self.right_list.bind("<Double-Button-1>", self._edit_right)
         self.right_list.bind("<F2>", self._edit_current)
-        self.right_list.bind("<Button-3>", self._show_context_menu)
-        # F2 生效需要 listbox 有焦点
-        self.right_list.bind("<Button-1>", lambda e: self.right_list.focus_set(), add="+")
+        self.right_list.bind("<Button-3>", self._show_right_menu)
+        self.right_list.bind("<Button-1>",
+                             lambda e: self.right_list.focus_set(), add="+")
 
-        # 右键菜单
+        # 右键菜单 —— 左
+        self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
+        self.ctx_left_menu.add_command(label="打开文件", command=self._open_left_file)
+        self.ctx_left_menu.add_command(label="复制文件名", command=self._copy_left_name)
+
+        # 右键菜单 —— 右
         self.ctx_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
+        self.ctx_menu.add_command(label="打开对应文件", command=self._open_right_file)
+        self.ctx_menu.add_separator()
         self.ctx_menu.add_command(label="编辑该行 (F2)", command=self._edit_current)
         self.ctx_menu.add_command(label="复制文本", command=self._copy_current)
-        self.ctx_menu.add_separator()
         self.ctx_menu.add_command(label="清空该行", command=self._clear_current)
 
         # 滚轮同步
@@ -147,6 +168,96 @@ class App:
         self.log_text.configure(yscrollcommand=ls.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ---------------- 联动高亮 & 日志跳转 ----------------
+    def _set_left_highlight(self, idx):
+        """仅改变左栏高亮，不触发联动（内部使用）"""
+        if self._hl_left_idx is not None and self._hl_left_idx != idx:
+            try:
+                self.left_list.itemconfig(self._hl_left_idx,
+                                          background="", foreground="")
+            except Exception:
+                pass
+        try:
+            self.left_list.itemconfig(idx, background=HL_COLOR, foreground="#000")
+            self._hl_left_idx = idx
+        except Exception:
+            pass
+
+    def _select_right_index(self, idx):
+        """同步选中右栏某一行（带递归保护）"""
+        self._syncing = True
+        try:
+            self.right_list.selection_clear(0, tk.END)
+            self.right_list.selection_set(idx)
+            self.right_list.see(idx)
+        finally:
+            self._syncing = False
+
+    def _on_left_click(self, event):
+        idx = self.left_list.nearest(event.y)
+        if idx < 0 or idx >= self.left_list.size():
+            return
+        self._set_left_highlight(idx)
+        self._select_right_index(idx)
+        self._jump_log(self.left_list.get(idx))
+
+    def _on_right_select(self, event):
+        if self._syncing:
+            return
+        sel = self.right_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]                    # 用最上面那个选中项联动
+        self._set_left_highlight(idx)
+        try:
+            self.left_list.see(idx)
+        except Exception:
+            pass
+        self._jump_log(self.left_list.get(idx))
+
+    def _jump_log(self, filename):
+        """在日志区搜索该文件名对应的记录并滚动+高亮"""
+        if not filename:
+            return
+        try:
+            total_lines = int(self.log_text.index("end-1c").split(".")[0])
+        except Exception:
+            total_lines = 0
+        if total_lines <= 1:
+            return
+
+        # 优先匹配 "[i/N] 文件名" 这行
+        pos = None
+        try:
+            pos = self.log_text.search(f"] {filename}", "1.0",
+                                       stopindex=tk.END, nocase=True)
+        except Exception:
+            pos = None
+        if not pos:
+            # 退回：只用不带扩展名的关键词
+            kw = os.path.splitext(filename)[0]
+            if kw:
+                try:
+                    pos = self.log_text.search(kw, "1.0",
+                                               stopindex=tk.END, nocase=True)
+                except Exception:
+                    pos = None
+        if not pos:
+            return
+
+        # 加高亮
+        try:
+            line = int(pos.split(".")[0])
+            state = self.log_text.cget("state")
+            self.log_text.configure(state="normal")
+            self.log_text.tag_remove("jump_hl", "1.0", tk.END)
+            self.log_text.tag_add("jump_hl", f"{line}.0", f"{line}.end")
+            self.log_text.tag_configure("jump_hl", background="#FFE082")
+            self.log_text.configure(state=state)
+            self.log_text.see(pos)
+        except Exception:
+            pass
 
     # ---------------- 滚动同步 ----------------
     def _on_yscroll_left(self, first, last):
@@ -190,6 +301,46 @@ class App:
         else:
             self.root.after(0, _do)
 
+    # ---------------- 打开文件 ----------------
+    def _open_file_at(self, idx):
+        if not self.directory:
+            messagebox.showwarning("提示", "请先读取目录")
+            return
+        if idx < 0 or idx >= self.left_list.size():
+            return
+        fname = self.left_list.get(idx)
+        path = os.path.join(self.directory, fname)
+        if not os.path.exists(path):
+            messagebox.showwarning("提示", f"文件不存在：\n{path}")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)                      # Windows
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])        # macOS
+            else:
+                subprocess.Popen(["xdg-open", path])    # Linux
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开：{e}")
+
+    def _open_left_file(self):
+        if self._ctx_left_idx is None:
+            return
+        self._open_file_at(self._ctx_left_idx)
+
+    def _open_right_file(self):
+        if self._ctx_right_idx is None:
+            return
+        self._open_file_at(self._ctx_right_idx)
+
+    def _copy_left_name(self):
+        if self._ctx_left_idx is None:
+            return
+        text = self.left_list.get(self._ctx_left_idx)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.config(text="已复制文件名", fg="blue")
+
     # ---------------- 目录 ----------------
     def select_dir(self):
         d = filedialog.askdirectory()
@@ -212,6 +363,7 @@ class App:
 
         self.left_list.delete(0, tk.END)
         self.right_list.delete(0, tk.END)
+        self._hl_left_idx = None
         for f in self.files:
             self.left_list.insert(tk.END, f)
             self.right_list.insert(tk.END, "")
@@ -231,25 +383,21 @@ class App:
         self.right_list.selection_clear(0, tk.END)
         self.status.config(text="已清空选择", fg="gray")
 
-    # ---------------- 手动编辑（核心） ----------------
+    # ---------------- 手动编辑 ----------------
     def _edit_right(self, event):
-        """双击右栏某行 → 编辑"""
         idx = self.right_list.nearest(event.y)
         if idx < 0:
             return
         self._open_edit_dialog(idx)
 
     def _edit_current(self, event=None):
-        """F2 / 按钮 / 右键菜单 → 编辑当前选中行"""
         sel = self.right_list.curselection()
         if not sel:
             messagebox.showinfo("提示", "请先在右侧列表中选中一行")
             return
-        # 只编辑第一个选中项
         self._open_edit_dialog(sel[0])
 
     def _open_edit_dialog(self, idx):
-        """弹出编辑对话框，修改后写回右栏 Listbox"""
         cur = self.right_list.get(idx)
         dlg = tk.Toplevel(self.root)
         dlg.title(f"编辑新文件名 —— 第 {idx+1} 行")
@@ -271,7 +419,6 @@ class App:
             new_text = e.get().strip()
             self.right_list.delete(idx)
             self.right_list.insert(idx, new_text)
-            # 保留该行的选中状态
             self.right_list.selection_clear(0, tk.END)
             self.right_list.selection_set(idx)
             self.right_list.see(idx)
@@ -310,13 +457,34 @@ class App:
         self.right_list.insert(idx, "")
         self.log(f"  ⌫ 第 {idx+1} 行已清空")
 
-    def _show_context_menu(self, event):
+    # ---------------- 右键菜单 ----------------
+    def _show_left_menu(self, event):
+        idx = self.left_list.nearest(event.y)
+        if idx < 0:
+            return
+        self._ctx_left_idx = idx
+        self._set_left_highlight(idx)
+        self._select_right_index(idx)
+        self._jump_log(self.left_list.get(idx))
+        try:
+            self.ctx_left_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.ctx_left_menu.grab_release()
+
+    def _show_right_menu(self, event):
         idx = self.right_list.nearest(event.y)
-        if idx >= 0:
-            # 如果该行没选中，就选中它
-            if idx not in self.right_list.curselection():
+        if idx < 0:
+            return
+        self._ctx_right_idx = idx
+        if idx not in self.right_list.curselection():
+            self._syncing = True
+            try:
                 self.right_list.selection_clear(0, tk.END)
                 self.right_list.selection_set(idx)
+            finally:
+                self._syncing = False
+            self._set_left_highlight(idx)
+            self._jump_log(self.left_list.get(idx))
         try:
             self.ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -354,7 +522,6 @@ class App:
 
             self.log(f"    → 最终：{result if result else '（无匹配，跳过）'}")
 
-            # 只在右栏当前为空时填入，避免覆盖用户手动编辑的内容
             self.root.after(0, self._set_right_if_empty, i, result)
             self.root.after(0, self.status.config,
                             {"text": f"搜索 {i+1}/{total}", "fg": "orange"})
@@ -368,7 +535,6 @@ class App:
         self.log("=== 搜索完成 ===")
 
     def _set_right_if_empty(self, i, text):
-        """仅当该行右栏为空时写入搜索结果，保护用户手动编辑的内容"""
         if i >= self.right_list.size():
             return
         cur = (self.right_list.get(i) or "").strip()
@@ -527,7 +693,6 @@ class App:
         tasks = []
         for i in sel:
             old_name = self.left_list.get(i)
-            # ★ 直接取右栏当前显示文字 —— 无论来自搜索还是手动编辑，都是最终值
             new_raw = (self.right_list.get(i) or "").strip()
             if not new_raw:
                 self.log(f"  [跳过] 第 {i+1} 行右栏为空：{old_name}")
