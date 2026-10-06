@@ -27,7 +27,8 @@ AI_MARKERS = [
     "ai generated", "ai-generated", "ai生成", "ai绘制", "ai繪製",
     "[ai]", "(ai)", "【ai】",
 ]
-HL_COLOR = "#FFF59D"   # 左栏联动高亮色
+HL_BG = "#1976D2"      # 高亮背景色（蓝）
+HL_FG = "white"        # 高亮前景色（白）
 
 
 class App:
@@ -54,12 +55,12 @@ class App:
         self.font_log  = ("Consolas", self.fs_log)
 
         self.directory = ""
-        self.files = []
+        self.files = []                # 磁盘实际文件名（含扩展名）
         self.searching = False
         self._syncing = False
-        self._hl_left_idx = None      # 左栏当前高亮行
-        self._ctx_left_idx = None     # 左栏右键目标行
-        self._ctx_right_idx = None    # 右栏右键目标行
+        self._hl_left_idx = None
+        self._ctx_left_idx = None
+        self._ctx_right_idx = None
 
         self._build()
 
@@ -79,7 +80,8 @@ class App:
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
         # 左列表
-        left = tk.LabelFrame(mid, text="① 原始文件名（只读，右键可打开）", font=self.font_main)
+        left = tk.LabelFrame(mid, text="① 原始文件名（不含后缀，双击可编辑，右键可打开）",
+                             font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         lf_left = tk.Frame(left)
         lf_left.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -103,8 +105,8 @@ class App:
 
         self.right_list = tk.Listbox(
             lf_right, font=self.font_main, fg="#1565C0",
-            selectmode=tk.EXTENDED, selectbackground="#1976D2",
-            selectforeground="white", exportselection=False)
+            selectmode=tk.EXTENDED, selectbackground=HL_BG,
+            selectforeground=HL_FG, exportselection=False)
         self.right_sb = ttk.Scrollbar(lf_right, orient="vertical",
                                       command=self.right_list.yview)
         self.right_list.configure(yscrollcommand=self._on_yscroll_right)
@@ -112,13 +114,13 @@ class App:
         self.right_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ---- 事件绑定 ----
-        # 左侧：单击联动 + 右键菜单
+        # 左侧：单击联动 + 双击编辑 + 右键菜单
         self.left_list.bind("<Button-1>", self._on_left_click)
+        self.left_list.bind("<Double-Button-1>", self._edit_left)
         self.left_list.bind("<Button-3>", self._show_left_menu)
 
-        # 右侧：选中联动（<<ListboxSelect>> 涵盖 单击/Shift/Ctrl/拖动）
+        # 右侧
         self.right_list.bind("<<ListboxSelect>>", self._on_right_select)
-        # 双击编辑 / F2 / 右键
         self.right_list.bind("<Double-Button-1>", self._edit_right)
         self.right_list.bind("<F2>", self._edit_current)
         self.right_list.bind("<Button-3>", self._show_right_menu)
@@ -128,6 +130,7 @@ class App:
         # 右键菜单 —— 左
         self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
         self.ctx_left_menu.add_command(label="打开文件", command=self._open_left_file)
+        self.ctx_left_menu.add_command(label="编辑该行", command=self._edit_left_current)
         self.ctx_left_menu.add_command(label="复制文件名", command=self._copy_left_name)
 
         # 右键菜单 —— 右
@@ -142,7 +145,7 @@ class App:
         self.left_list.bind("<MouseWheel>", self._on_mousewheel)
         self.right_list.bind("<MouseWheel>", self._on_mousewheel)
 
-        # 底部按钮
+        # 底部
         bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
         self.status.pack(side=tk.LEFT)
@@ -171,7 +174,6 @@ class App:
 
     # ---------------- 联动高亮 & 日志跳转 ----------------
     def _set_left_highlight(self, idx):
-        """仅改变左栏高亮，不触发联动（内部使用）"""
         if self._hl_left_idx is not None and self._hl_left_idx != idx:
             try:
                 self.left_list.itemconfig(self._hl_left_idx,
@@ -179,13 +181,12 @@ class App:
             except Exception:
                 pass
         try:
-            self.left_list.itemconfig(idx, background=HL_COLOR, foreground="#000")
+            self.left_list.itemconfig(idx, background=HL_BG, foreground=HL_FG)
             self._hl_left_idx = idx
         except Exception:
             pass
 
     def _select_right_index(self, idx):
-        """同步选中右栏某一行（带递归保护）"""
         self._syncing = True
         try:
             self.right_list.selection_clear(0, tk.END)
@@ -200,7 +201,8 @@ class App:
             return
         self._set_left_highlight(idx)
         self._select_right_index(idx)
-        self._jump_log(self.left_list.get(idx))
+        if idx < len(self.files):
+            self._jump_log(self.files[idx])
 
     def _on_right_select(self, event):
         if self._syncing:
@@ -208,16 +210,16 @@ class App:
         sel = self.right_list.curselection()
         if not sel:
             return
-        idx = sel[0]                    # 用最上面那个选中项联动
+        idx = sel[0]
         self._set_left_highlight(idx)
         try:
             self.left_list.see(idx)
         except Exception:
             pass
-        self._jump_log(self.left_list.get(idx))
+        if idx < len(self.files):
+            self._jump_log(self.files[idx])
 
     def _jump_log(self, filename):
-        """在日志区搜索该文件名对应的记录并滚动+高亮"""
         if not filename:
             return
         try:
@@ -227,7 +229,6 @@ class App:
         if total_lines <= 1:
             return
 
-        # 优先匹配 "[i/N] 文件名" 这行
         pos = None
         try:
             pos = self.log_text.search(f"] {filename}", "1.0",
@@ -235,7 +236,6 @@ class App:
         except Exception:
             pos = None
         if not pos:
-            # 退回：只用不带扩展名的关键词
             kw = os.path.splitext(filename)[0]
             if kw:
                 try:
@@ -246,14 +246,14 @@ class App:
         if not pos:
             return
 
-        # 加高亮
         try:
             line = int(pos.split(".")[0])
             state = self.log_text.cget("state")
             self.log_text.configure(state="normal")
             self.log_text.tag_remove("jump_hl", "1.0", tk.END)
             self.log_text.tag_add("jump_hl", f"{line}.0", f"{line}.end")
-            self.log_text.tag_configure("jump_hl", background="#FFE082")
+            self.log_text.tag_configure("jump_hl", background=HL_BG,
+                                        foreground=HL_FG)
             self.log_text.configure(state=state)
             self.log_text.see(pos)
         except Exception:
@@ -306,20 +306,19 @@ class App:
         if not self.directory:
             messagebox.showwarning("提示", "请先读取目录")
             return
-        if idx < 0 or idx >= self.left_list.size():
+        if idx < 0 or idx >= len(self.files):
             return
-        fname = self.left_list.get(idx)
-        path = os.path.join(self.directory, fname)
+        path = os.path.join(self.directory, self.files[idx])
         if not os.path.exists(path):
             messagebox.showwarning("提示", f"文件不存在：\n{path}")
             return
         try:
             if sys.platform.startswith("win"):
-                os.startfile(path)                      # Windows
+                os.startfile(path)
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])        # macOS
+                subprocess.Popen(["open", path])
             else:
-                subprocess.Popen(["xdg-open", path])    # Linux
+                subprocess.Popen(["xdg-open", path])
         except Exception as e:
             messagebox.showerror("错误", f"无法打开：{e}")
 
@@ -365,7 +364,8 @@ class App:
         self.right_list.delete(0, tk.END)
         self._hl_left_idx = None
         for f in self.files:
-            self.left_list.insert(tk.END, f)
+            stem = os.path.splitext(f)[0]    # 去掉扩展名
+            self.left_list.insert(tk.END, stem)
             self.right_list.insert(tk.END, "")
         self.log(f"读取目录：{d}，共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
@@ -383,7 +383,62 @@ class App:
         self.right_list.selection_clear(0, tk.END)
         self.status.config(text="已清空选择", fg="gray")
 
-    # ---------------- 手动编辑 ----------------
+    # ---------------- 左栏编辑（新增） ----------------
+    def _edit_left(self, event):
+        idx = self.left_list.nearest(event.y)
+        if idx < 0:
+            return
+        self._open_left_edit_dialog(idx)
+
+    def _edit_left_current(self):
+        if self._ctx_left_idx is None:
+            return
+        self._open_left_edit_dialog(self._ctx_left_idx)
+
+    def _open_left_edit_dialog(self, idx):
+        cur = self.left_list.get(idx)
+        disk = self.files[idx] if idx < len(self.files) else ""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"编辑原始文件名（不含后缀） —— 第 {idx+1} 行")
+        dlg.geometry(f"{int(820*self.scale)}x{int(180*self.scale)}")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        tk.Label(dlg, text=f"磁盘文件：{disk}",
+                 font=self.font_main, fg="#555").pack(anchor="w", padx=10, pady=(10, 0))
+        tk.Label(dlg, text="修改文件名主体（扩展名不变，重命名时自动保留）：",
+                 font=self.font_main, fg="#333").pack(anchor="w", padx=10, pady=(5, 0))
+
+        e = tk.Entry(dlg, font=self.font_main)
+        e.pack(fill=tk.X, padx=10, pady=10)
+        e.insert(0, cur)
+        e.focus_set()
+        e.select_range(0, tk.END)
+        e.icursor(tk.END)
+
+        def ok(_=None):
+            new_text = e.get().strip()
+            self.left_list.delete(idx)
+            self.left_list.insert(idx, new_text)
+            self._set_left_highlight(idx)
+            self.status.config(text=f"第 {idx+1} 行已更新", fg="blue")
+            self.log(f"  ✎ 第 {idx+1} 行原文件名手动修改为：{new_text}")
+            dlg.destroy()
+
+        def cancel(_=None):
+            dlg.destroy()
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=5)
+        tk.Button(btn_frame, text="确定", width=10, font=self.font_main,
+                  command=ok).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="取消", width=10, font=self.font_main,
+                  command=cancel).pack(side=tk.LEFT, padx=5)
+
+        dlg.bind("<Return>", ok)
+        dlg.bind("<Escape>", cancel)
+
+    # ---------------- 右栏编辑 ----------------
     def _edit_right(self, event):
         idx = self.right_list.nearest(event.y)
         if idx < 0:
@@ -423,7 +478,7 @@ class App:
             self.right_list.selection_set(idx)
             self.right_list.see(idx)
             self.status.config(text=f"第 {idx+1} 行已更新", fg="blue")
-            self.log(f"  ✎ 第 {idx+1} 行手动修改为：{new_text}")
+            self.log(f"  ✎ 第 {idx+1} 行新文件名手动修改为：{new_text}")
             dlg.destroy()
 
         def cancel(_=None):
@@ -465,7 +520,8 @@ class App:
         self._ctx_left_idx = idx
         self._set_left_highlight(idx)
         self._select_right_index(idx)
-        self._jump_log(self.left_list.get(idx))
+        if idx < len(self.files):
+            self._jump_log(self.files[idx])
         try:
             self.ctx_left_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -484,7 +540,8 @@ class App:
             finally:
                 self._syncing = False
             self._set_left_highlight(idx)
-            self._jump_log(self.left_list.get(idx))
+            if idx < len(self.files):
+                self._jump_log(self.files[idx])
         try:
             self.ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -692,23 +749,34 @@ class App:
 
         tasks = []
         for i in sel:
-            old_name = self.left_list.get(i)
-            new_raw = (self.right_list.get(i) or "").strip()
-            if not new_raw:
-                self.log(f"  [跳过] 第 {i+1} 行右栏为空：{old_name}")
+            if i >= len(self.files):
                 continue
-            tasks.append((i, old_name, new_raw))
+            old_disk_name = self.files[i]                       # 磁盘实际名（含扩展名）
+            old_stem, ext = os.path.splitext(old_disk_name)
+            left_text  = (self.left_list.get(i) or "").strip()  # 左栏当前显示（不含后缀）
+            right_text = (self.right_list.get(i) or "").strip() # 右栏当前显示
+
+            # 新文件名来源：右栏优先，右栏空则用左栏（如果左栏被编辑过）
+            if right_text:
+                new_raw = right_text
+            elif left_text and left_text != old_stem:
+                new_raw = left_text
+            else:
+                self.log(f"  [跳过] 第 {i+1} 行无变化：{old_disk_name}")
+                continue
+
+            tasks.append((i, old_disk_name, ext, new_raw))
 
         if not tasks:
             messagebox.showinfo(
                 "提示",
-                f"选中的 {len(sel)} 行，右侧文字都是空的。\n\n"
-                "请先点“开始搜索”填充右侧，或双击右侧行手动填写。")
+                f"选中的 {len(sel)} 行，没有可用于重命名的新名称。\n\n"
+                "请先点“开始搜索”填充右侧，或双击任意一侧手动填写。")
             return
 
         lines = []
-        for i, old, new in tasks[:12]:
-            lines.append(f"{old}\n    ➜  {new}")
+        for i, old_name, ext, new_raw in tasks[:12]:
+            lines.append(f"{old_name}\n    ➜  {new_raw}")
         if len(tasks) > 12:
             lines.append(f"... 还有 {len(tasks)-12} 个")
         preview = "\n".join(lines)
@@ -721,43 +789,50 @@ class App:
         ok_n, fail = 0, []
         updates = []
 
-        for i, old_name, new_raw in tasks:
-            old_path = os.path.join(self.directory, old_name)
-            ext = os.path.splitext(old_name)[1]
+        for i, old_disk_name, ext, new_raw in tasks:
+            old_path = os.path.join(self.directory, old_disk_name)
             new_base = re.sub(ILLEGAL, "_", new_raw).strip().rstrip(".") or "unnamed"
-            new_name = new_base if new_base.lower().endswith(ext.lower()) else new_base + ext
+            # 保留原扩展名
+            if not new_base.lower().endswith(ext.lower()):
+                new_name = new_base + ext
+            else:
+                new_name = new_base
             new_path = os.path.join(self.directory, new_name)
 
             if os.path.normcase(new_path) == os.path.normcase(old_path):
-                self.log(f"  - 名称相同跳过：{old_name}")
+                self.log(f"  - 名称相同跳过：{old_disk_name}")
                 continue
 
             if os.path.exists(new_path):
-                stem, e = os.path.splitext(new_name)
+                stem2, e2 = os.path.splitext(new_name)
                 k = 1
-                while os.path.exists(os.path.join(self.directory, f"{stem}_{k}{e}")):
+                while os.path.exists(os.path.join(self.directory, f"{stem2}_{k}{e2}")):
                     k += 1
-                new_name = f"{stem}_{k}{e}"
+                new_name = f"{stem2}_{k}{e2}"
                 new_path = os.path.join(self.directory, new_name)
 
             try:
                 os.rename(old_path, new_path)
                 ok_n += 1
                 updates.append((i, new_name))
-                self.log(f"  ✓ {old_name}  →  {new_name}")
+                self.log(f"  ✓ {old_disk_name}  →  {new_name}")
             except Exception as e:
-                fail.append(f"{old_name}: {e}")
-                self.log(f"  ✗ {old_name}: {e}")
+                fail.append(f"{old_disk_name}: {e}")
+                self.log(f"  ✗ {old_disk_name}: {e}")
 
-        for i, new_name in updates:
-            self.left_list.delete(i)
-            self.left_list.insert(i, new_name)
-            self.right_list.delete(i)
-            self.right_list.insert(i, "")
-
-        self.right_list.selection_clear(0, tk.END)
+        # 原地更新：左栏显示新名（去扩展名），右栏清空
         for i, new_name in updates:
             self.files[i] = new_name
+            new_stem = os.path.splitext(new_name)[0]
+            self.left_list.delete(i)
+            self.left_list.insert(i, new_stem)
+            self.right_list.delete(i)
+            self.right_list.insert(i, "")
+            # 若更新后的行是当前高亮行，重新上色
+            if self._hl_left_idx == i:
+                self.left_list.itemconfig(i, background=HL_BG, foreground=HL_FG)
+
+        self.right_list.selection_clear(0, tk.END)
 
         msg = f"成功重命名 {ok_n} 个文件"
         if fail:
