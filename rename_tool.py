@@ -23,7 +23,27 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("批量文件搜索重命名")
-        root.geometry("1250x760")
+
+        # ---------- DPI / 分辨率自适应 ----------
+        try:
+            self.dpi = root.winfo_fpixels('1i')
+        except Exception:
+            self.dpi = 96
+        self.scale = max(1.0, self.dpi / 96.0)
+
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        win_w = min(int(1250 * self.scale), int(sw * 0.95))
+        win_h = min(int(940 * self.scale), int(sh * 0.92))
+        root.geometry(f"{win_w}x{win_h}+{(sw - win_w) // 2}+{(sh - win_h) // 2}")
+        root.minsize(int(900 * self.scale), int(600 * self.scale))
+
+        # 字体（tk scaling 已在 main 里按 DPI 设置）
+        self.fs     = max(10, int(10 * self.scale))
+        self.fs_log = max(9,  int(9  * self.scale))
+        self.font_main = ("Microsoft YaHei", self.fs)
+        self.font_log  = ("Consolas", self.fs_log)
+
         self.directory = ""
         self.files = []
         self.searching = False
@@ -31,54 +51,58 @@ class App:
 
     # ---------------- UI ----------------
     def _build(self):
-        # 顶部：目录
-        top = tk.Frame(self.root); top.pack(fill=tk.X, padx=10, pady=8)
-        tk.Label(top, text="目录：").pack(side=tk.LEFT)
-        self.dir_entry = tk.Entry(top)
+        pad = int(10 * self.scale)
+
+        # 顶部
+        top = tk.Frame(self.root); top.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
+        tk.Label(top, text="目录：", font=self.font_main).pack(side=tk.LEFT)
+        self.dir_entry = tk.Entry(top, font=self.font_main)
         self.dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        tk.Button(top, text="浏览", width=8, command=self.select_dir).pack(side=tk.LEFT)
-        tk.Button(top, text="读取", width=8, command=self.load_files).pack(side=tk.LEFT, padx=5)
+        tk.Button(top, text="浏览", width=8, font=self.font_main,
+                  command=self.select_dir).pack(side=tk.LEFT)
+        tk.Button(top, text="读取", width=8, font=self.font_main,
+                  command=self.load_files).pack(side=tk.LEFT, padx=5)
 
-        # 中部：左右两个列表
-        mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=10)
+        # 中部左右列表
+        mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
-        # 左：原始文件名（只读参考）
-        left = tk.LabelFrame(mid, text="① 原始文件名（只读）")
+        left = tk.LabelFrame(mid, text="① 原始文件名（只读）", font=self.font_main)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.left_list = tk.Listbox(left, font=("Microsoft YaHei", 10),
+        self.left_list = tk.Listbox(left, font=self.font_main,
                                     selectmode=tk.NONE, activestyle="none")
         self.left_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 右：新文件名（多选/框选主战场）
         right = tk.LabelFrame(
-            mid,
-            text="② 新文件名 —— 单击选中 / Shift+单击范围选 / Ctrl+单击加选 / 鼠标拖动划选")
-        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+            mid, font=self.font_main,
+            text="② 新文件名 —— 单击选中 / Shift+单击范围选 / Ctrl+单击加选 / 拖动划选")
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(pad, 0))
         self.right_list = tk.Listbox(
-            right, font=("Microsoft YaHei", 10), fg="#1565C0",
+            right, font=self.font_main, fg="#1565C0",
             selectmode=tk.EXTENDED, selectbackground="#1976D2",
             selectforeground="white")
         self.right_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.right_list.bind("<Double-Button-1>", self._edit_right)
 
         # 底部操作栏
-        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=10, pady=8)
-        self.status = tk.Label(bottom, text="就绪", fg="gray")
+        bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
+        self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
         self.status.pack(side=tk.LEFT)
 
-        tk.Button(bottom, text="确认重命名选中行", width=18, bg="#2196F3", fg="white",
+        tk.Button(bottom, text="确认重命名选中行", width=18, font=self.font_main,
+                  bg="#2196F3", fg="white",
                   command=self.confirm_rename).pack(side=tk.RIGHT, padx=3)
-        tk.Button(bottom, text="开始搜索", width=12, bg="#4CAF50", fg="white",
-                  command=self.start_search).pack(side=tk.RIGHT, padx=10)
-        tk.Button(bottom, text="清空选择", width=10,
+        tk.Button(bottom, text="开始搜索", width=12, font=self.font_main,
+                  bg="#4CAF50", fg="white",
+                  command=self.start_search).pack(side=tk.RIGHT, padx=int(10 * self.scale))
+        tk.Button(bottom, text="清空选择", width=10, font=self.font_main,
                   command=self.clear_selection).pack(side=tk.RIGHT, padx=3)
-        tk.Button(bottom, text="全选", width=8,
+        tk.Button(bottom, text="全选", width=8, font=self.font_main,
                   command=self.select_all).pack(side=tk.RIGHT, padx=3)
 
-        # 日志
-        lf = tk.LabelFrame(self.root, text="日志")
-        lf.pack(fill=tk.X, padx=10, pady=(0, 8))
-        self.log_text = tk.Text(lf, height=7, font=("Consolas", 9), state="disabled")
+        # 日志区（加高）
+        lf = tk.LabelFrame(self.root, text="日志", font=self.font_main)
+        lf.pack(fill=tk.X, padx=pad, pady=(0, int(8 * self.scale)))
+        self.log_text = tk.Text(lf, height=12, font=self.font_log, state="disabled")
         ls = ttk.Scrollbar(lf, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=ls.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
@@ -144,10 +168,10 @@ class App:
             return
         dlg = tk.Toplevel(self.root)
         dlg.title("编辑新文件名")
-        dlg.geometry("720x110")
+        dlg.geometry(f"{int(720*self.scale)}x{int(120*self.scale)}")
         dlg.transient(self.root)
         dlg.grab_set()
-        e = tk.Entry(dlg, font=("Microsoft YaHei", 10))
+        e = tk.Entry(dlg, font=self.font_main)
         e.pack(fill=tk.X, padx=10, pady=10)
         e.insert(0, self.right_list.get(idx))
         e.focus_set()
@@ -157,7 +181,7 @@ class App:
             self.right_list.insert(idx, e.get())
             self.right_list.selection_set(idx)
             dlg.destroy()
-        tk.Button(dlg, text="确定", command=ok).pack(pady=5)
+        tk.Button(dlg, text="确定", font=self.font_main, command=ok).pack(pady=5)
         dlg.bind("<Return>", ok)
 
     # ---------------- 搜索 ----------------
@@ -175,29 +199,48 @@ class App:
         s = requests.Session()
         s.headers.update(HEADERS)
         total = len(self.files)
+
         for i, name in enumerate(self.files):
-            kw = os.path.splitext(name)[0]
-            kw = re.sub(r"[\s\-_]+", " ", kw).strip()
-            url = SEARCH_URL.format(requests.utils.quote(kw))
+            base_kw = os.path.splitext(name)[0]
             self.log(f"[{i+1}/{total}] {name}")
-            try:
-                r = s.get(url, timeout=20)
-                self.log(f"    HTTP {r.status_code}，{len(r.text)} 字节")
-                if r.status_code != 200:
-                    result = ""
-                else:
-                    r.encoding = r.apparent_encoding or "utf-8"
-                    result = self._parse(r.text, kw)
-                    self.log(f"    → {result if result else '（无匹配）'}")
-            except Exception as e:
-                result = ""
-                self.log(f"    异常：{e}")
+
+            # —— 首次搜索 ——
+            result = self._search_one(s, base_kw)
+            self.log(f"    首次：{result if result else '（无匹配）'}")
+
+            # —— 无匹配 → 立即去掉前两个字符重试一次 ——
+            if not result and len(base_kw) > 2:
+                trimmed = base_kw[2:]
+                if trimmed != base_kw:
+                    self.log(f"    ↻ 立即重试（去前2字符）：{trimmed}")
+                    result = self._search_one(s, trimmed)
+                    self.log(f"    重试：{result if result else '（仍无匹配）'}")
+
+            self.log(f"    → 最终：{result if result else '（无匹配，跳过）'}")
 
             self.root.after(0, self._set_right, i, result)
             self.root.after(0, self.status.config,
                             {"text": f"搜索 {i+1}/{total}", "fg": "orange"})
-            time.sleep(1)
+            time.sleep(1)   # 每个文件之间间隔 1 秒
+
         self.root.after(0, self._search_done)
+
+    def _search_one(self, session, keyword_raw):
+        """执行一次搜索，返回匹配到的名称（无匹配返回空字符串）"""
+        kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
+        if not kw:
+            return ""
+        url = SEARCH_URL.format(requests.utils.quote(kw))
+        try:
+            r = session.get(url, timeout=20)
+            self.log(f"      HTTP {r.status_code}，{len(r.text)} 字节 | {url}")
+            if r.status_code != 200:
+                return ""
+            r.encoding = r.apparent_encoding or "utf-8"
+            return self._parse(r.text, kw)
+        except Exception as e:
+            self.log(f"      异常：{e}")
+            return ""
 
     def _search_done(self):
         self.searching = False
@@ -212,7 +255,6 @@ class App:
     def _parse(self, html, kw):
         soup = BeautifulSoup(html, "html.parser")
         links = soup.select('a[href*="/photos-index-aid-"]')
-        self.log(f"    photos-index-aid 链接 {len(links)} 个")
         if not links:
             return ""
         cands = []
@@ -232,7 +274,7 @@ class App:
         m = difflib.get_close_matches(kw, cands, n=1, cutoff=0.2)
         return m[0] if m else cands[0]
 
-    # ---------------- 确认重命名（只处理选中行，原地更新 UI） ----------------
+    # ---------------- 确认重命名 ----------------
     def confirm_rename(self):
         sel = self.right_list.curselection()
         self.log(f"=== 确认重命名，选中 {len(sel)} 行 ===")
@@ -248,7 +290,6 @@ class App:
                 "· 或点“全选”按钮")
             return
 
-        # 直接取右栏当前文字
         tasks = []
         for i in sel:
             old_name = self.left_list.get(i)
@@ -265,7 +306,6 @@ class App:
                 "请先点“开始搜索”填充右侧，或双击右侧行手动填写。")
             return
 
-        # 预览
         lines = []
         for i, old, new in tasks[:12]:
             lines.append(f"{old}\n    ➜  {new}")
@@ -279,7 +319,7 @@ class App:
             return
 
         ok_n, fail = 0, []
-        updates = []   # (行索引, 新文件名) —— 用于原地刷新 UI
+        updates = []
 
         for i, old_name, new_raw in tasks:
             old_path = os.path.join(self.directory, old_name)
@@ -309,17 +349,14 @@ class App:
                 fail.append(f"{old_name}: {e}")
                 self.log(f"  ✗ {old_name}: {e}")
 
-        # ===== 原地更新被重命名的行，其他行保持原样 =====
+        # 原地更新被重命名的行，其他行保持不变
         for i, new_name in updates:
-            # 更新左栏文字为新文件名
             self.left_list.delete(i)
             self.left_list.insert(i, new_name)
-            # 右栏对应位置清空（表示已完成）
             self.right_list.delete(i)
             self.right_list.insert(i, "")
-        # 清除选择
+
         self.right_list.selection_clear(0, tk.END)
-        # 同步内存里的文件名列表，避免后续操作错位
         for i, new_name in updates:
             self.files[i] = new_name
 
@@ -332,11 +369,21 @@ class App:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    # 必须在 Tk() 之前开启 DPI 感知，程序才不会模糊
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+
+    root = tk.Tk()
+
+    # 按 DPI 设置 tk 全局缩放（字体物理大小自动适配）
+    try:
+        dpi = root.winfo_fpixels('1i')
+        root.tk.call('tk', 'scaling', dpi / 72.0)
+    except Exception:
+        pass
+
     App(root)
     root.mainloop()
