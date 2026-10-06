@@ -58,10 +58,10 @@ class App:
         self.directory = ""
         self.files = []
         self.searching = False
-        self._scrolling_sync = False           # 滚动同步防递归
-        self._last_synced_item = None          # 选择联动防递归
-        self._jump_after_id = None             # 日志跳转防抖
-        self._last_open_time = 0.0             # 打开图标防抖
+        self._scrolling_sync = False
+        self._last_synced_item = None
+        self._jump_after_id = None
+        self._last_open_time = 0.0
 
         self._build()
 
@@ -152,12 +152,20 @@ class App:
         self.right_tree.bind("<MouseWheel>", self._on_mousewheel)
         self.right_tree.bind("<F2>", lambda e: self._edit_current_tree("R"))
 
-        # 右键菜单
+        # ---- 快捷键 Ctrl+C / Ctrl+A ----
+        for t in (self.left_tree, self.right_tree):
+            t.bind("<Control-c>", lambda e, w=t: self._copy_from_tree(w))
+            t.bind("<Control-C>", lambda e, w=t: self._copy_from_tree(w))
+            t.bind("<Control-a>", lambda e, w=t: self._select_all_in(w))
+            t.bind("<Control-A>", lambda e, w=t: self._select_all_in(w))
+            t.bind("<Control-Shift-Key-A>", lambda e, w=t: self._select_all_in(w))
+
+        # ---- 右键菜单 ----
         self.ctx_left_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
         self.ctx_left_menu.add_command(label="编辑该行",
                                        command=lambda: self._edit_current_tree("L"))
-        self.ctx_left_menu.add_command(label="复制文件名",
-                                       command=lambda: self._copy_current_tree("L"))
+        self.ctx_left_menu.add_command(label="复制文件名 (Ctrl+C)",
+                                       command=lambda: self._copy_from_tree(self.left_tree))
         self.ctx_left_menu.add_separator()
         self.ctx_left_menu.add_command(label="清空该行",
                                        command=lambda: self._clear_current_tree("L"))
@@ -165,8 +173,8 @@ class App:
         self.ctx_right_menu = tk.Menu(self.root, tearoff=0, font=self.font_main)
         self.ctx_right_menu.add_command(label="编辑该行",
                                         command=lambda: self._edit_current_tree("R"))
-        self.ctx_right_menu.add_command(label="复制文本",
-                                        command=lambda: self._copy_current_tree("R"))
+        self.ctx_right_menu.add_command(label="复制文本 (Ctrl+C)",
+                                        command=lambda: self._copy_from_tree(self.right_tree))
         self.ctx_right_menu.add_separator()
         self.ctx_right_menu.add_command(label="清空该行",
                                         command=lambda: self._clear_current_tree("R"))
@@ -196,7 +204,7 @@ class App:
         tk.Button(bottom, text="清空选择", width=10, font=self.font_main,
                   command=self.clear_selection).pack(side=tk.RIGHT, padx=3)
         tk.Button(bottom, text="全选", width=8, font=self.font_main,
-                  command=self.select_all).pack(side=tk.RIGHT, padx=3)
+                  command=lambda: self._select_all_in(self.right_tree)).pack(side=tk.RIGHT, padx=3)
 
         # ---- 日志 ----
         lf = tk.LabelFrame(self.root, text="日志", font=self.font_main)
@@ -207,8 +215,47 @@ class App:
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ---------------- 选择联动（无递归） ----------------
+    # ---------------- 复制 / 全选 ----------------
+    def _copy_from_tree(self, tree):
+        sel = tree.selection()
+        if not sel:
+            return "break"
+        if len(sel) == 1:
+            text = tree.set(sel[0], "name")
+        else:
+            text = "\n".join(tree.set(i, "name") for i in sel)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status.config(text=f"已复制 {len(sel)} 项到剪贴板", fg="blue")
+        return "break"
+
+    def _select_all_in(self, tree):
+        items = tree.get_children()
+        if not items:
+            return "break"
+        mode = str(tree.cget("selectmode"))
+        if mode == "browse":
+            # 左栏为单选模式，仅选第一行
+            self._last_synced_item = items[0]
+            tree.selection_set(items[0])
+            tree.focus(items[0])
+            tree.see(items[0])
+            self.status.config(text="左栏为单选模式，已选中第一行", fg="gray")
+        else:
+            self._last_synced_item = items[0]
+            tree.selection_set(items)
+            tree.focus(items[0])
+            tree.see(items[0])
+            self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
+        return "break"
+
+    # ---------------- 选择联动 ----------------
     def _on_left_select(self, event=None):
+        # 焦点交给左树，Ctrl+C/Ctrl+A 才能响应
+        try:
+            self.left_tree.focus_set()
+        except Exception:
+            pass
         sel = self.left_tree.selection()
         if not sel:
             return
@@ -216,16 +263,18 @@ class App:
         if item == self._last_synced_item:
             return
         self._last_synced_item = item
-        # 同步到右侧
         self.right_tree.selection_set(item)
         self.right_tree.focus(item)
         self.right_tree.see(item)
-        # 跳日志
         idx = int(item)
         if 0 <= idx < len(self.files):
             self._schedule_jump(self.files[idx])
 
     def _on_right_select(self, event=None):
+        try:
+            self.right_tree.focus_set()
+        except Exception:
+            pass
         sel = self.right_tree.selection()
         if not sel:
             return
@@ -241,7 +290,6 @@ class App:
             self._schedule_jump(self.files[idx])
 
     def _schedule_jump(self, filename):
-        """日志跳转防抖：80ms 内的连续点击只执行最后一次"""
         if self._jump_after_id is not None:
             try:
                 self.root.after_cancel(self._jump_after_id)
@@ -329,7 +377,6 @@ class App:
         tree.set(item, "name", new_val)
         if side == "L":
             self.log(f"  ✎ 第 {idx+1} 行 原文件名 → {new_val}")
-            # 左侧编辑后，同步刷新右侧为该内容
             if self.right_tree.exists(item):
                 self.right_tree.set(item, "name", new_val)
             if idx < len(self.files):
@@ -347,7 +394,6 @@ class App:
         item = tree.identify_row(event.y)
         if not item:
             return
-        # 双击编辑需要延迟一点，让默认选择先处理完
         self.root.after(10, lambda: self._start_cell_edit(tree, item, side))
 
     def _edit_current_tree(self, side):
@@ -357,16 +403,6 @@ class App:
             messagebox.showinfo("提示", "请先选中一行")
             return
         self._start_cell_edit(tree, sel[0], side)
-
-    def _copy_current_tree(self, side):
-        tree = self.left_tree if side == "L" else self.right_tree
-        sel = tree.selection()
-        if not sel:
-            return
-        text = tree.set(sel[0], "name")
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.status.config(text="已复制到剪贴板", fg="blue")
 
     def _clear_current_tree(self, side):
         tree = self.left_tree if side == "L" else self.right_tree
@@ -382,13 +418,15 @@ class App:
         if not item:
             return
         if item not in tree.selection():
+            self._last_synced_item = item
             tree.selection_set(item)
+        tree.focus_set()
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
 
-    # ---------------- 打开文件（点 📂） ----------------
+    # ---------------- 打开文件 ----------------
     def _on_click(self, event, tree):
         region = tree.identify_region(event.x, event.y)
         if region != "cell":
@@ -508,16 +546,7 @@ class App:
         self.log(f"读取目录：{d}，共 {len(self.files)} 个文件")
         self.status.config(text=f"已读取 {len(self.files)} 个文件", fg="green")
 
-    # ---------------- 全选 / 清空 ----------------
-    def select_all(self):
-        items = self.right_tree.get_children()
-        if not items:
-            return
-        self._last_synced_item = items[0]
-        self.right_tree.selection_set(items)
-        self.right_tree.see(items[0])
-        self.status.config(text=f"已选中 {len(items)} 行", fg="blue")
-
+    # ---------------- 清空选择 ----------------
     def clear_selection(self):
         self._last_synced_item = None
         self.right_tree.selection_remove(*self.right_tree.selection())
@@ -719,6 +748,7 @@ class App:
                 "· 单击 = 选中一行\n"
                 "· Shift + 单击 = 范围选中\n"
                 "· Ctrl + 单击 = 加选\n"
+                "· Ctrl + A = 全选\n"
                 "· 双击 = 直接编辑该行")
             return
 
