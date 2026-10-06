@@ -38,7 +38,6 @@ class App:
         root.geometry(f"{win_w}x{win_h}+{(sw - win_w) // 2}+{(sh - win_h) // 2}")
         root.minsize(int(900 * self.scale), int(600 * self.scale))
 
-        # 字体（tk scaling 已在 main 里按 DPI 设置）
         self.fs     = max(10, int(10 * self.scale))
         self.fs_log = max(9,  int(9  * self.scale))
         self.font_main = ("Microsoft YaHei", self.fs)
@@ -53,7 +52,6 @@ class App:
     def _build(self):
         pad = int(10 * self.scale)
 
-        # 顶部
         top = tk.Frame(self.root); top.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         tk.Label(top, text="目录：", font=self.font_main).pack(side=tk.LEFT)
         self.dir_entry = tk.Entry(top, font=self.font_main)
@@ -63,7 +61,6 @@ class App:
         tk.Button(top, text="读取", width=8, font=self.font_main,
                   command=self.load_files).pack(side=tk.LEFT, padx=5)
 
-        # 中部左右列表
         mid = tk.Frame(self.root); mid.pack(fill=tk.BOTH, expand=True, padx=pad)
 
         left = tk.LabelFrame(mid, text="① 原始文件名（只读）", font=self.font_main)
@@ -83,7 +80,6 @@ class App:
         self.right_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.right_list.bind("<Double-Button-1>", self._edit_right)
 
-        # 底部操作栏
         bottom = tk.Frame(self.root); bottom.pack(fill=tk.X, padx=pad, pady=int(8 * self.scale))
         self.status = tk.Label(bottom, text="就绪", fg="gray", font=self.font_main)
         self.status.pack(side=tk.LEFT)
@@ -99,7 +95,6 @@ class App:
         tk.Button(bottom, text="全选", width=8, font=self.font_main,
                   command=self.select_all).pack(side=tk.RIGHT, padx=3)
 
-        # 日志区（加高）
         lf = tk.LabelFrame(self.root, text="日志", font=self.font_main)
         lf.pack(fill=tk.X, padx=pad, pady=(0, int(8 * self.scale)))
         self.log_text = tk.Text(lf, height=12, font=self.font_log, state="disabled")
@@ -108,13 +103,23 @@ class App:
         self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ---------------- 日志 ----------------
+    # ---------------- 日志（用户拖动时不强制回到最新） ----------------
     def log(self, msg):
         def _do():
+            # 判断插入前是否处于底部（用户没往上拖）
+            try:
+                at_bottom = self.log_text.yview()[1] >= 0.999
+            except Exception:
+                at_bottom = True
+
             self.log_text.configure(state="normal")
             self.log_text.insert(tk.END, str(msg) + "\n")
-            self.log_text.see(tk.END)
             self.log_text.configure(state="disabled")
+
+            # 只有原本就在底部才跟随最新；用户手动上滚时不打扰
+            if at_bottom:
+                self.log_text.see(tk.END)
+
         if threading.current_thread() is threading.main_thread():
             _do()
         else:
@@ -204,11 +209,9 @@ class App:
             base_kw = os.path.splitext(name)[0]
             self.log(f"[{i+1}/{total}] {name}")
 
-            # —— 首次搜索 ——
             result = self._search_one(s, base_kw)
             self.log(f"    首次：{result if result else '（无匹配）'}")
 
-            # —— 无匹配 → 立即去掉前两个字符重试一次 ——
             if not result and len(base_kw) > 2:
                 trimmed = base_kw[2:]
                 if trimmed != base_kw:
@@ -221,12 +224,11 @@ class App:
             self.root.after(0, self._set_right, i, result)
             self.root.after(0, self.status.config,
                             {"text": f"搜索 {i+1}/{total}", "fg": "orange"})
-            time.sleep(1)   # 每个文件之间间隔 1 秒
+            time.sleep(1)
 
         self.root.after(0, self._search_done)
 
     def _search_one(self, session, keyword_raw):
-        """执行一次搜索，返回匹配到的名称（无匹配返回空字符串）"""
         kw = re.sub(r"[\s\-_]+", " ", keyword_raw).strip()
         if not kw:
             return ""
@@ -252,27 +254,71 @@ class App:
             self.right_list.delete(i)
             self.right_list.insert(i, text)
 
+    # ---------- 多结果时取页数最多的 ----------
     def _parse(self, html, kw):
         soup = BeautifulSoup(html, "html.parser")
         links = soup.select('a[href*="/photos-index-aid-"]')
         if not links:
+            self.log("      · 无 photos-index-aid 链接")
             return ""
-        cands = []
+
+        items = []          # [(name, pages), ...]
+        seen = set()
         for a in links:
             t = (a.get("title") or a.get_text(strip=True) or "").strip()
-            if t and t not in cands:
-                cands.append(t)
-        if not cands:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            pages = self._extract_pages(a)
+            items.append((t, pages))
+
+        if not items:
             return ""
+
+        self.log(f"      · 候选 {len(items)} 个：")
+        for t, p in items[:8]:
+            self.log(f"          [{p:>4}张] {t[:70]}")
+        if len(items) > 8:
+            self.log(f"          ... 还有 {len(items)-8} 个")
+
         low = kw.lower()
-        for c in cands:
-            if c.lower() == low:
-                return c
-        for c in cands:
-            if low in c.lower():
-                return c
-        m = difflib.get_close_matches(kw, cands, n=1, cutoff=0.2)
-        return m[0] if m else cands[0]
+        def sim(t):
+            return difflib.SequenceMatcher(None, low, t.lower()).ratio()
+
+        exact    = [(t, p) for t, p in items if t.lower() == low]
+        contains = [(t, p) for t, p in items if low in t.lower()]
+        similar  = [(t, p) for t, p in items if sim(t) >= 0.35]
+
+        for group, label in ((exact, "精确匹配"),
+                             (contains, "包含匹配"),
+                             (similar, "相似匹配")):
+            if group:
+                group.sort(key=lambda x: -x[1])   # 页数降序
+                best = group[0]
+                self.log(f"      ✓ {label}，取页数最多：[{best[1]}张] {best[0][:60]}")
+                return best[0]
+
+        self.log("      ✗ 相似度不足，视为无匹配")
+        return ""
+
+    def _extract_pages(self, a_tag):
+        """从链接所在容器里的 .info_col 中提取页数，例如 26張圖片 → 26"""
+        parent = a_tag
+        for _ in range(6):
+            parent = parent.parent
+            if parent is None:
+                break
+            info = parent.find(class_="info_col")
+            if info:
+                text = info.get_text()
+                m = re.search(r'(\d+)\s*張圖片', text)
+                if m:
+                    return int(m.group(1))
+                m = re.search(r'(\d+)\s*张图片', text)
+                if m:
+                    return int(m.group(1))
+                break
+        return 0
 
     # ---------------- 确认重命名 ----------------
     def confirm_rename(self):
@@ -369,7 +415,6 @@ class App:
 
 
 if __name__ == "__main__":
-    # 必须在 Tk() 之前开启 DPI 感知，程序才不会模糊
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
@@ -377,8 +422,6 @@ if __name__ == "__main__":
         pass
 
     root = tk.Tk()
-
-    # 按 DPI 设置 tk 全局缩放（字体物理大小自动适配）
     try:
         dpi = root.winfo_fpixels('1i')
         root.tk.call('tk', 'scaling', dpi / 72.0)
